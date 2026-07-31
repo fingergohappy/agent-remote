@@ -1,0 +1,153 @@
+/**
+ * 接手补历史（D12 / modules.md §4.10 history-flow）。
+ * 把 provider 原生 transcript **一次性投影**到当前 Topic —— 不是另开历史数据库。
+ */
+import type { AppContext } from './context.ts';
+import { CB } from './context.ts';
+import type { Binding } from '../core/bind-store.ts';
+import type { InlineButton } from '../core/egress-queue.ts';
+import { logger } from '../infra/logger.ts';
+import { getProvider } from '../providers/registry.ts';
+import type { AgentProvider, HistoryResult } from '../providers/types.ts';
+import { escapeHtml, formatHistory, historyHeader, renderHistoryPage } from '../telegram/format.ts';
+
+const log = logger('history-flow');
+
+/** 分页浏览的默认每页条数 */
+export const HISTORY_PAGE_SIZE = 10;
+/** 分页最多往回翻这么多条 —— 再早的历史读文件代价与展示价值都不划算 */
+const HISTORY_WINDOW = 400;
+
+function mirrorCapable(binding: Binding): AgentProvider | { message: string } {
+  const provider = getProvider(binding.providerId);
+  if (!provider) return { message: `未知 provider: ${binding.providerId}` };
+  if (!provider.capabilities.nativeTranscript || !provider.fetchHistory) {
+    return { message: `${provider.displayName} 不支持读取会话记录。` };
+  }
+  return provider;
+}
+
+async function fetchFor(
+  provider: AgentProvider,
+  binding: Binding,
+  limit: number,
+): Promise<HistoryResult | { message: string }> {
+  try {
+    return await provider.fetchHistory!(
+      {
+        paneId: binding.paneId,
+        sessionId: binding.sessionId,
+        transcriptPath: binding.transcriptPath,
+        cwd: binding.cwd,
+      },
+      { limit },
+    );
+  } catch (err) {
+    log.warn('fetchHistory 失败', err);
+    return { message: `读取历史失败：${err instanceof Error ? err.message : err}` };
+  }
+}
+
+export type HistoryOutcome =
+  | { ok: true; count: number }
+  | { ok: false; message: string };
+
+export async function syncHistory(
+  ctx: AppContext,
+  binding: Binding,
+  limit: number,
+): Promise<HistoryOutcome> {
+  const provider = mirrorCapable(binding);
+  if ('message' in provider) return { ok: false, message: provider.message };
+
+  const result = await fetchFor(provider, binding, limit);
+  if ('message' in result) return { ok: false, message: result.message };
+
+  if (!result.items.length) {
+    return {
+      ok: false,
+      message: '未找到会话记录。',
+    };
+  }
+
+  const threadId = binding.threadId || undefined;
+
+  await ctx.egress.enqueue({
+    chatId: binding.chatId,
+    threadId,
+    text: historyHeader(result.items.length, result.source),
+    parseMode: 'HTML',
+  });
+
+  for (const chunk of formatHistory(result.items)) {
+    await ctx.egress.enqueue({
+      chatId: binding.chatId,
+      threadId,
+      text: chunk,
+      parseMode: 'HTML',
+    });
+  }
+
+  await ctx.egress.enqueue({
+    chatId: binding.chatId,
+    threadId,
+    text: '—— 以上为历史，以下实时 ——',
+  });
+
+  return { ok: true, count: result.items.length };
+}
+
+export type HistoryPageView =
+  | { ok: true; text: string; buttons: InlineButton[][]; page: number; pages: number }
+  | { ok: false; message: string };
+
+/**
+ * 分页浏览历史（无状态）：每次翻页都重读 transcript 再切片，
+ * 按钮里只带「页码 + 每页条数」—— 服务重启后旧消息上的按钮照样能用。
+ *
+ * @param pageReq 1 起算的页码；0 表示尾页（最新一页）。越界自动收敛。
+ */
+export async function buildHistoryPage(
+  binding: Binding,
+  pageReq: number,
+  size: number,
+): Promise<HistoryPageView> {
+  const provider = mirrorCapable(binding);
+  if ('message' in provider) return { ok: false, message: provider.message };
+
+  const result = await fetchFor(provider, binding, HISTORY_WINDOW);
+  if ('message' in result) return { ok: false, message: result.message };
+
+  const items = result.items.filter((i) => i.kind !== 'tool');
+  if (!items.length) return { ok: false, message: '未找到会话记录。' };
+
+  const pages = Math.ceil(items.length / size);
+  const page = pageReq <= 0 ? pages : Math.min(Math.max(pageReq, 1), pages);
+  const start = (page - 1) * size;
+  const pageItems = items.slice(start, start + size);
+
+  const body = renderHistoryPage(pageItems);
+  const atWindowCap = items.length >= HISTORY_WINDOW;
+  const header =
+    `📜 <b>${page}/${pages}</b> 页 · 第 ${start + 1}–${start + pageItems.length} 条` +
+    `（共 ${items.length}${atWindowCap ? '+' : ''} 条）`;
+  const source = result.source ? `\n<i>${escapeHtml(result.source)}</i>` : '';
+
+  // 翻页按钮不做禁用态（Telegram 没有）：边界上点⏮/◀ 会编辑出相同内容，
+  // egress 对 not modified 静默成功，体感就是「没动」
+  const nav: InlineButton[] = [
+    { text: '⏮', callbackData: CB.historyPage(1, size) },
+    { text: '◀', callbackData: CB.historyPage(Math.max(1, page - 1), size) },
+    { text: `${page}/${pages}`, callbackData: CB.historyPage(page, size) },
+    { text: '▶', callbackData: CB.historyPage(Math.min(pages, page + 1), size) },
+    { text: '⏭', callbackData: CB.historyPage(0, size) },
+  ];
+
+  return {
+    ok: true,
+    text: `${header}${source}\n\n${body.text}`,
+    buttons: [nav],
+    page,
+    pages,
+  };
+}

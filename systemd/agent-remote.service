@@ -1,0 +1,24 @@
+[Unit]
+Description=agent-remote — 手机遥控 tmux 里的 coding agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 按实际路径改这两行
+WorkingDirectory=%h/code/mycode/agent-remote
+ExecStart=/usr/bin/env node %h/code/mycode/agent-remote/src/main.ts
+
+Restart=on-failure
+RestartSec=5s
+
+# tmux 控制需要能访问用户的 tmux socket，所以不做 PrivateTmp / 强沙箱
+Environment=NODE_ENV=production
+# 配置从 ~/.agent-remote/.env 读，这里不重复
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=agent-remote
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,89 @@
+/** Claude Code provider。 */
+import type {
+  AgentProvider,
+  DecisionUiSpec,
+  HistoryRef,
+  HistoryResult,
+  NormalizedEvent,
+} from '../types.ts';
+import { detectClaude } from './detect.ts';
+import { normalizeClaude } from './normalize.ts';
+import { fetchClaudeHistory, pollClaudeTranscript } from './history.ts';
+
+function permissionResponse(decision: 'allow' | 'deny', reason: string): unknown {
+  return {
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      permissionDecision: decision,
+      permissionDecisionReason: reason,
+    },
+  };
+}
+
+export const claudeProvider: AgentProvider = {
+  id: 'claude',
+  displayName: 'Claude Code',
+
+  capabilities: {
+    // PreToolUse hook 能结构化返回 allow/deny，不用模拟 TUI 按键
+    semanticPermission: true,
+    // AskUserQuestion 的 updatedInput 回填未实现 —— 不假装（design.md §6.7）
+    structuredQuestion: false,
+    nativeTranscript: true,
+    resumeSession: false,
+    spawnFromBot: false,
+    // UserPromptSubmit hook 提供终端活跃信号
+    activitySuppress: true,
+  },
+
+  detect: detectClaude,
+
+  normalizeIngress(raw: unknown): NormalizedEvent | null {
+    return normalizeClaude(raw);
+  },
+
+  buildDecisionUi(event: NormalizedEvent): DecisionUiSpec | null {
+    if (event.type !== 'permission' || !event.blocking) return null;
+    return {
+      prompt: event.summary ? `请求授权：${event.summary}` : '请求授权',
+      buttons: [
+        { id: 'allow', label: '✅ 允许' },
+        { id: 'deny', label: '⛔ 拒绝' },
+      ],
+    };
+  },
+
+  async resolveDecision(_event: NormalizedEvent, decisionId: string) {
+    if (decisionId === 'allow') {
+      return {
+        ok: true,
+        hookResponse: permissionResponse('allow', '已在 Telegram 批准'),
+        note: '已允许',
+      };
+    }
+    if (decisionId === 'deny') {
+      return {
+        ok: true,
+        hookResponse: permissionResponse('deny', '已在 Telegram 拒绝'),
+        note: '已拒绝',
+      };
+    }
+    return { ok: false, note: `未知决策: ${decisionId}` };
+  },
+
+  /**
+   * 超时不替用户拍板：返回空响应，Claude 退回本机 TUI 自己的权限框。
+   * （fail-open 到本地，而不是静默 allow 或 deny。）
+   */
+  decisionTimeoutResponse(): unknown {
+    return {};
+  },
+
+  fetchHistory(ref: HistoryRef, opts: { limit: number }): Promise<HistoryResult> {
+    return fetchClaudeHistory(ref, opts);
+  },
+
+  pollNativeEnhancements(ref: HistoryRef, cursor: unknown) {
+    return pollClaudeTranscript(ref, cursor);
+  },
+};
