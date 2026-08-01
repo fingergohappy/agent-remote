@@ -1,6 +1,8 @@
 # push v* tag → 发布 npm 包(trusted publishing / OIDC,免 token)。
 # 前置(一次性):
-#   1. 首个版本本地手动 npm publish(trusted publishing 配不了还不存在的包)
+#   1. 首个版本本地手动 npm publish --access public
+#      (trusted publishing 配不了还不存在的包;CI 里用 token 发会被
+#      npm 以 EOTP 拒绝——绕过 2FA 的 token 已不允许直接 publish)
 #   2. npmjs.com → 包 Settings → Trusted Publisher:
 #      GitHub Actions / fingergohappy / agent-remote / release.yml
 # 发版流程:npm version patch && git push --follow-tags
@@ -44,10 +46,5 @@ jobs:
             exit 1
           fi
 
-      # 正常态走 OIDC(trusted publishing),不需要任何 secret。
-      # 下面的 env 只为首发引导:npm 限制「包必须已存在」才能配 trusted
-      # publisher,所以 v0.1.0 用一次性 token 发;配好 trusted publisher 后
-      # 删掉这两行 env 并撤销 token,之后永久免 token。
+      # 走 OIDC(trusted publishing),不需要任何 secret。
       - run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

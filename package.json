@@ -11,9 +11,10 @@
     "url": "git+https://github.com/fingergohappy/agent-remote.git"
   },
   "bin": {
-    "agent-remote": "./src/main.ts"
+    "agent-remote": "dist/main.js"
   },
   "files": [
+    "dist",
     "src",
     "hooks",
     ".env.example",
@@ -27,6 +28,7 @@
     "test": "node --test 'test/**/*.test.ts'",
     "check": "npm run typecheck && npm test",
     "prepublishOnly": "npm run check",
+    "prepack": "npm run build",
     "sync:plugins": "cp -f hooks/agent-remote-hook.sh hooks/claude-hook.sh plugins/claude/scripts/ && cp -f hooks/agent-remote-hook.sh hooks/codex-hook.sh plugins/codex/scripts/"
   },
   "dependencies": {
