@@ -85,6 +85,16 @@ export async function resolveRollout(
   ref: HistoryRef,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<string | null> {
+  // hooks 引擎的 payload 直接带 transcript_path —— 最精确，免扫描
+  if (ref.transcriptPath) {
+    try {
+      statSync(ref.transcriptPath);
+      return ref.transcriptPath;
+    } catch {
+      /* 文件没了，走扫描 */
+    }
+  }
+
   const files = listRollouts(sessionsRoot(env));
   if (!files.length) return null;
 

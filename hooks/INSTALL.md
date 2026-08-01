@@ -5,6 +5,11 @@
 
 依赖：`curl`、`jq`、`openssl`。
 
+> **一键配置**：`node src/main.ts setup` 会自动把下面两节的 hook 合并写入
+> `~/.claude/settings.json` 与 `~/.codex/hooks.json`（不动你已有的其它 hook），
+> 加 `--approval` 同时装上阻塞授权，`--uninstall` 干净摘除。
+> 本文其余部分是等价的手工路线与字段说明。
+
 先确认服务在跑：
 
 ```bash
@@ -83,7 +88,33 @@ hook 内部的 curl 等待自动取 `DECISION_TIMEOUT_SEC + 40s`；但上面 set
 
 ## Codex
 
-Codex 走 `notify` 程序（不是 stdin hook）：codex 把事件 JSON 作为最后一个参数传给它。
+Codex ≥ 0.124 有和 Claude 同形的 **hooks 引擎**（payload 从 stdin 进），推荐走这条路 ——
+事件全、还能在手机上批权限。更老的版本只有单向的 `notify`，见下面「遗留」小节。
+
+### hooks 引擎（推荐）
+
+把 [`codex-hooks.json`](codex-hooks.json) 的内容**合并**进 `~/.codex/hooks.json`
+（把 `/ABSOLUTE/PATH/TO/agent-remote` 换成实际仓库路径；已有别的 hook 时并列写进
+同一个事件数组，别覆盖）：
+
+| hook | 用途 |
+|------|------|
+| `SessionStart` | 建立 `paneId ↔ sessionId` 映射，`/history` 精确定位会话 |
+| `UserPromptSubmit` | **不推送**，只用于会话索引与镜像触发 |
+| `Stop` | 完成通知 |
+| `SessionEnd` | 会话结束 |
+| `PermissionRequest` | **阻塞式**：codex 弹本机授权框的同时，手机上出现允许/拒绝按钮 |
+
+`PermissionRequest` 只在 codex 本来就要问你的时刻触发，所以默认就带上 ——
+没有它，绑定的 codex 卡在授权框上时手机端**什么信号都收不到**（codex 没有
+等价于 Claude `Notification` 的事件）。超时不会替你决定：hook 输出空，
+codex 退回本机 TUI 的权限框照常问你。`"timeout": 140` 是 codex 侧的死数字，
+改大 `DECISION_TIMEOUT_SEC` 时要同步它 ≥ 新值 + 40（同 Claude 侧的约定）。
+
+首次触发时 codex 会要求你确认信任新 hook（`config.toml` 里的 `[hooks.state]`
+记录的就是这个），确认一次即可。
+
+### 遗留 notify（codex < 0.124）
 
 编辑 `~/.codex/config.toml`：
 
@@ -91,13 +122,14 @@ Codex 走 `notify` 程序（不是 stdin hook）：codex 把事件 JSON 作为�
 notify = ["/home/你的用户名/code/mycode/agent-remote/hooks/codex-hook.sh"]
 ```
 
-路径必须是**绝对路径**，`~` 不会展开。
+路径必须是**绝对路径**，`~` 不会展开。notify 只发 `agent-turn-complete` 一种事件
+（实测 0.146.0），即只有「完成」通知，没有权限/提问回调。
 
-实测 codex 0.146.0 只发一种事件 `agent-turn-complete`，所以 Codex 侧目前只有「完成」通知，
-没有权限/提问回调 —— 这也是 `codexProvider.capabilities.semanticPermission = false` 的原因，
-Telegram 上不会给 Codex 显示批准按钮（不做兑现不了的 UI）。
+**别两条路一起装**：hooks 引擎的 `Stop` 和 notify 的 `agent-turn-complete` 语义重叠，
+同时装会重复推「完成」。装好 hooks 引擎后把 `notify` 那行从 config.toml 里删掉。
 
-`/history` 对 Codex 照常可用，读的是 `~/.codex/sessions/**/rollout-*.jsonl`。
+`/history` 对 Codex 照常可用，读的是 `~/.codex/sessions/**/rollout-*.jsonl`；
+hooks 引擎的事件自带 `transcript_path`，定位会话比 notify 时代的 cwd 启发式更准。
 
 ---
 

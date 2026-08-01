@@ -7,7 +7,7 @@ Claude Code / Codex。绑定单位是 **pane（`%14`）**，不是 window ——
 本仓库是它的实现。
 
 ```
-Claude hooks   Codex notify
+Claude hooks   Codex hooks/notify
       │              │
       ▼              ▼
  providers/claude  providers/codex     ← 只有这里认识各家的字段
@@ -32,10 +32,10 @@ Claude hooks   Codex notify
 | **推送** | hook 事件 + **对话全文**（读 agent 原生 transcript）→ 对应 Topic |
 | **回写** | Topic 里打字 → `tmux send-keys -t %N`，不经任何 LLM |
 | **补历史** | `/history` 把绑定前的原生会话记录投影进 Topic（Claude jsonl / Codex rollout） |
-| **授权** | Claude 的 `PreToolUse` 可在手机上点允许/拒绝，走结构化 hook 响应而非模拟按键 |
+| **授权** | Claude 的 `PreToolUse` / Codex 的 `PermissionRequest` 可在手机上点允许/拒绝，走结构化 hook 响应而非模拟按键 |
 
-Codex 侧只有「完成」通知 —— codex 的 `notify` 是单向的，没有权限回调，所以**不显示**
-兑现不了的按钮（`capabilities.semanticPermission = false`）。
+Codex ≥ 0.124 有和 Claude 同形的 hooks 引擎，事件与权限回调都全；
+更老的版本只有单向的 `notify`（仅「完成」通知），provider 两种格式都认，老配置不迁移也能用。
 
 ## 快速开始
 
@@ -50,7 +50,8 @@ node src/main.ts doctor    # 看配置 + 当前能发现哪些 agent
 node src/main.ts           # 启动
 ```
 
-装 hook：见 [hooks/INSTALL.md](hooks/INSTALL.md)。
+装 hook：`node src/main.ts setup` 一键合并写入两侧配置（`--approval` 加手机授权，
+`--uninstall` 摘除）；手工路线与字段说明见 [hooks/INSTALL.md](hooks/INSTALL.md)。
 常驻：见 [systemd/README.md](systemd/README.md)。
 
 **要多工位就得有话题（Topics）**，两条路都行：
@@ -123,6 +124,7 @@ src/
   telegram/        bot · commands · topics · format
   infra/           tmux · process-tree · http · state-fs · logger
 hooks/             装到 agent 那边的薄脚本
+plugins/           Claude Code / Codex 插件壳（hook 注册的分发通道，见 plugins/README.md）
 ```
 
 **依赖方向只许向下。** `providers/` 不得 import `telegram/`，`core/` 不得解析任何

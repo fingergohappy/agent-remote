@@ -77,3 +77,54 @@ test('Codex 不认识的事件不产事件', () => {
   assert.equal(normalizeCodex({ type: 'token-count' }), null);
   assert.equal(normalizeCodex({}), null);
 });
+
+// ── hooks 引擎（v0.124+）通路 ────────────────────────────────────────────────
+
+test('Codex hooks 引擎 Stop → completed，带 session/transcript/pane', () => {
+  const e = normalizeCodex({
+    hook_event_name: 'Stop',
+    session_id: 'sess-9',
+    transcript_path: '/home/u/.codex/sessions/2026/08/01/rollout-x-sess-9.jsonl',
+    cwd: '/home/u/proj',
+    paneId: '%7',
+  });
+  assert.equal(e?.type, 'completed');
+  assert.equal(e?.providerId, 'codex');
+  assert.equal(e?.paneId, '%7');
+  assert.equal(e?.sessionId, 'sess-9');
+  assert.equal(e?.transcriptPath, '/home/u/.codex/sessions/2026/08/01/rollout-x-sess-9.jsonl');
+});
+
+test('Codex SessionStart / UserPromptSubmit 与 Claude 同约定', () => {
+  const started = normalizeCodex({ hook_event_name: 'SessionStart', session_id: 's' });
+  assert.equal(started?.type, 'started');
+
+  const typed = normalizeCodex({ hook_event_name: 'UserPromptSubmit', paneId: '%2' });
+  assert.equal(typed?.type, 'output');
+  assert.equal(typed?.silent, true);
+});
+
+test('Codex PermissionRequest 带 correlationId 才算阻塞事件', () => {
+  const blocking = normalizeCodex({
+    hook_event_name: 'PermissionRequest',
+    tool_name: 'Bash',
+    tool_input: { command: 'rm -rf /tmp/x' },
+    correlationId: 'beef1234',
+  });
+  assert.equal(blocking?.type, 'permission');
+  assert.equal(blocking?.blocking, true);
+  assert.match(blocking?.summary ?? '', /Bash: rm -rf/);
+
+  const nonBlocking = normalizeCodex({ hook_event_name: 'PreToolUse', tool_name: 'Read' });
+  assert.equal(nonBlocking?.type, 'permission');
+  assert.equal(nonBlocking?.blocking, false);
+});
+
+test('Codex transcript_path 为 null 时不进事件（hooks 引擎会给 null）', () => {
+  const e = normalizeCodex({ hook_event_name: 'Stop', transcript_path: null });
+  assert.equal(e?.transcriptPath, undefined);
+});
+
+test('Codex 不认识的 hook_event_name 返回 null', () => {
+  assert.equal(normalizeCodex({ hook_event_name: 'SomethingNew' }), null);
+});

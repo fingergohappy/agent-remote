@@ -5,6 +5,7 @@
  * 本文件是唯一允许认识这些字段名的地方（design.md §6.7 反模式）。
  */
 import type { NormalizedEvent } from '../types.ts';
+import { firstLine, summarizeToolInput } from '../hook-summary.ts';
 import { t } from '../../i18n.ts';
 
 export type ClaudeHookRaw = {
@@ -24,23 +25,6 @@ export type ClaudeHookRaw = {
 
 const PERMISSION_HINT = /permission|approve|allow|授权|权限/i;
 const IDLE_HINT = /waiting for your input|idle|等待/i;
-
-function firstLine(s: string, max = 300): string {
-  const line = s.replace(/\s+/g, ' ').trim();
-  return line.length > max ? line.slice(0, max - 1) + '…' : line;
-}
-
-function summarizeToolInput(toolName: string | undefined, input: unknown): string {
-  const name = toolName || 'tool';
-  if (input && typeof input === 'object') {
-    const obj = input as Record<string, unknown>;
-    for (const key of ['command', 'file_path', 'path', 'pattern', 'url', 'description']) {
-      const v = obj[key];
-      if (typeof v === 'string' && v.trim()) return `${name}: ${firstLine(v, 200)}`;
-    }
-  }
-  return name;
-}
 
 export function normalizeClaude(raw: unknown): NormalizedEvent | null {
   if (!raw || typeof raw !== 'object') return null;
