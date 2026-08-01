@@ -1,7 +1,7 @@
 /**
  * `agent-remote setup`：一键把 hook 注册进两侧配置（INSTALL.md 的自动化等价物）。
  *
- *   - ~/.agent-remote/.env 不存在则从 .env.example 初始化，自动生成 INGRESS_SECRET
+ *   - ~/.config/agent-remote/.env 不存在则从 .env.example 初始化，自动生成 INGRESS_SECRET
  *   - ~/.claude/settings.json 合并观察类 hook；--approval 追加阻塞式 PreToolUse
  *   - ~/.codex/hooks.json 合并观察类 hook + PermissionRequest（codex 没有等价于
  *     Claude Notification 的事件，没有它，绑定的 codex 等授权时手机端无信号）
@@ -16,7 +16,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from
 import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { defaultHome, loadConfig } from './config.ts';
+import { defaultHome, legacyHome, loadConfig, xdgHome } from './config.ts';
 
 // ── 结构与判定 ────────────────────────────────────────────────────────────────
 
@@ -257,6 +257,10 @@ export async function runSetup(
         : `✗ 服务没在跑 —— hook 会静默跳过。启动: node src/main.ts（常驻见 systemd/README.md）`,
     );
     lines.push(`  自检: node src/main.ts doctor`);
+    // 只提示「回落到旧位置」这一种情况；显式设了 AGENT_REMOTE_HOME 的不算跑偏
+    if (!process.env.AGENT_REMOTE_HOME && paths.home === legacyHome()) {
+      lines.push(`  配置仍在旧位置: mv ${paths.home} ${xdgHome()}（迁移后重启服务）`);
+    }
     if (!approval) {
       lines.push(`  想在手机上批 Claude 的工具调用: 重跑 setup --approval`);
     }

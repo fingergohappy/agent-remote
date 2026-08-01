@@ -25,7 +25,11 @@ done
 
 [ -n "$PROVIDER" ] || exit 0
 
-HOME_DIR="${AGENT_REMOTE_HOME:-$HOME/.agent-remote}"
+HOME_DIR="${AGENT_REMOTE_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/agent-remote}"
+# 回落到旧位置（0.1.1 及更早）——判据是 .env 而非目录，与 src/config.ts 一致
+if [ -z "${AGENT_REMOTE_HOME:-}" ] && [ ! -f "$HOME_DIR/.env" ] && [ -f "$HOME/.agent-remote/.env" ]; then
+  HOME_DIR="$HOME/.agent-remote"
+fi
 ENV_FILE="$HOME_DIR/.env"
 
 if [ -f "$ENV_FILE" ]; then

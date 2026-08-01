@@ -1,8 +1,9 @@
 /**
- * 配置加载：process.env 优先，其次 $AGENT_REMOTE_HOME/.env（默认 ~/.agent-remote/.env）。
+ * 配置加载：process.env 优先，其次 $AGENT_REMOTE_HOME/.env
+ * （默认 ~/.config/agent-remote/.env，遵循 XDG_CONFIG_HOME）。
  * 见 modules.md §7。
  */
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -100,8 +101,28 @@ export function toNotifyLevel(v: string | undefined, dflt: NotifyLevel): NotifyL
   return v === 'off' || v === 'important' || v === 'info' ? v : dflt;
 }
 
+/** XDG 位置：$XDG_CONFIG_HOME/agent-remote，默认 ~/.config/agent-remote。 */
+export function xdgHome(env: NodeJS.ProcessEnv = process.env): string {
+  const home = env.HOME || homedir();
+  return join(env.XDG_CONFIG_HOME || join(home, '.config'), 'agent-remote');
+}
+
+/** 0.1.1 及更早的位置，保留只为让老安装无痛过渡。 */
+export function legacyHome(env: NodeJS.ProcessEnv = process.env): string {
+  return join(env.HOME || homedir(), '.agent-remote');
+}
+
+/**
+ * 配置目录。AGENT_REMOTE_HOME > XDG 位置 > 旧位置。
+ * 回落判据是 `.env` 而非目录本身：服务启动会 mkdir 新目录，若按目录判定，
+ * 老用户第一次跑就会切到空目录、丢掉旧配置。
+ */
 export function defaultHome(env: NodeJS.ProcessEnv = process.env): string {
-  return env.AGENT_REMOTE_HOME || join(env.HOME || homedir(), '.agent-remote');
+  if (env.AGENT_REMOTE_HOME) return env.AGENT_REMOTE_HOME;
+  const xdg = xdgHome(env);
+  if (existsSync(join(xdg, '.env'))) return xdg;
+  const legacy = legacyHome(env);
+  return existsSync(join(legacy, '.env')) ? legacy : xdg;
 }
 
 /** 读取配置。`strict=false` 时不校验必填项（供 CLI 子命令使用）。 */

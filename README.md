@@ -57,16 +57,20 @@ alias agent-remote='node src/main.ts'   # 下文命令两种方式通用
 agent-remote setup
 ```
 
-它做三件事：初始化 `~/.agent-remote/.env`（自动生成 `INGRESS_SECRET`）；把 hook
+它做三件事：初始化 `~/.config/agent-remote/.env`（自动生成 `INGRESS_SECRET`）；把 hook
 合并写入 `~/.claude/settings.json` 与 `~/.codex/hooks.json` —— 幂等、不碰你已有的
 其它 hook、改前自动备份。`--approval` 追加「手机上批 Claude 工具调用」，
 `--uninstall` 干净摘除。手工装 hook 与逐字段说明见 [hooks/INSTALL.md](hooks/INSTALL.md)，
 插件方式见 [plugins/README.md](plugins/README.md)。
 
-然后补上 `~/.agent-remote/.env` 里的两个必填项：
+然后补上 `~/.config/agent-remote/.env` 里的两个必填项：
 
 - `TELEGRAM_BOT_TOKEN` —— 找 @BotFather 建一个独立 Bot
 - `ALLOWED_USERS` —— 你自己的 Telegram user id（白名单）
+
+> 配置目录遵循 XDG：`$XDG_CONFIG_HOME/agent-remote`，未设则 `~/.config/agent-remote`；
+> `AGENT_REMOTE_HOME` 可整体覆盖。0.1.1 及更早用的是 `~/.agent-remote` —— 那里若有
+> `.env` 且新位置没有，仍会照旧读取，`mv ~/.agent-remote ~/.config/agent-remote` 即完成迁移。
 
 ### 3. 启动服务
 
@@ -123,7 +127,7 @@ info 下**不推**「✅ 完成」这类空洞事件 —— 回复原文镜像�
 **agent 的回复是怎么拿到的**：Claude 的 `Stop` hook 只带 session_id / transcript_path，
 **不含回复正文**。所以 info 下另有一路 `core/transcript-watcher`，按 byte offset 增量读
 agent 自己的会话文件（Claude 的 jsonl / Codex 的 rollout），把新增的往来追加到话题。
-镜像游标持久化在 `~/.agent-remote/mirror-cursors.json`：重启后从上次位置续读，
+镜像游标持久化在 `~/.config/agent-remote/mirror-cursors.json`：重启后从上次位置续读，
 间隙写入的对话不丢；只有首次见到某个 transcript 文件才从末尾起跟（不回放陈年历史）。
 
 绑定即推送：不做「人在终端前」的揣测 —— 绑了就发，级别由 `/notify` 控制。
@@ -144,7 +148,7 @@ npm run build       # 编译到 dist/（生产可用 node dist/main.js）
 ```
 src/
   main.ts          组装与启动
-  config.ts        env / ~/.agent-remote/.env
+  config.ts        env / ~/.config/agent-remote/.env
   app/             用例编排：bind / notify / chat / history / decision / mirror
   core/            discover · bind-store · ingress · notify-policy · transcript-watcher ·
                    send · egress-queue · decision-broker · agent-index · activity
@@ -172,8 +176,8 @@ provider 私有字段 —— 加新 agent 应该只写一个 provider 包 + 注�
 
 | 状态 | 在哪 | 持久 |
 |------|------|------|
-| 绑定 | `~/.agent-remote/bindings.json` | ✅ |
-| 配置 | `~/.agent-remote/.env` | ✅ |
+| 绑定 | `~/.config/agent-remote/bindings.json` | ✅ |
+| 配置 | `~/.config/agent-remote/.env` | ✅ |
 | 待决策 | 内存（TTL；重启断掉被 hold 的 hook，agent 退回本机权限框） | ❌ |
 | discover / 活跃度 | 内存 | ❌ |
 | **对话历史** | **只在 Telegram Topic 里**（D8） | TG 侧 |

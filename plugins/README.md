@@ -1,6 +1,6 @@
 # 插件（免手改配置的 hook 注册通道）
 
-两个插件只负责**注册 hook**；常驻服务与 `~/.agent-remote/.env` 仍要按仓库根
+两个插件只负责**注册 hook**；常驻服务与 `~/.config/agent-remote/.env` 仍要按仓库根
 README 先装好 —— 服务不在时 hook 静默退出 0，先装插件后启服务也不炸。
 
 | 目录 | 给谁 | 带哪些 hook |

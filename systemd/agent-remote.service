@@ -14,7 +14,7 @@ RestartSec=5s
 
 # tmux 控制需要能访问用户的 tmux socket，所以不做 PrivateTmp / 强沙箱
 Environment=NODE_ENV=production
-# 配置从 ~/.agent-remote/.env 读，这里不重复
+# 配置从 ~/.config/agent-remote/.env 读，这里不重复
 
 StandardOutput=journal
 StandardError=journal
