@@ -1,0 +1,7 @@
+{
+  "name": "agent-remote",
+  "version": "0.1.0",
+  "description": "手机遥控 tmux 里的 Codex。把 hooks 引擎事件（会话/完成/授权请求）POST 给本机 agent-remote 常驻服务，由它转发到 Telegram；PermissionRequest 可在手机上点允许/拒绝，超时退回本机权限框。服务未运行时 hook 静默跳过，不影响 codex。",
+  "author": { "name": "fingergohappy" },
+  "homepage": "https://github.com/fingergohappy/agent-remote"
+}

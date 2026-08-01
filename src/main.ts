@@ -33,6 +33,7 @@ import {
 } from './telegram/bot.ts';
 import { registerHandlers } from './telegram/commands.ts';
 import { discover } from './core/discover.ts';
+import { runSetup } from './setup.ts';
 
 const log = logger('main');
 
@@ -82,6 +83,10 @@ async function main(): Promise<void> {
   const arg = process.argv[2];
   if (arg === 'doctor' || arg === '--check') {
     process.exitCode = await runDoctor();
+    return;
+  }
+  if (arg === 'setup') {
+    process.exitCode = await runSetup(process.argv.slice(3));
     return;
   }
 

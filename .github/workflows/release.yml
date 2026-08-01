@@ -1,0 +1,46 @@
+# push v* tag → 发布 npm 包。
+# 前置(一次性):
+#   1. 仓库推到 GitHub
+#   2. npmjs.com 生成 granular access token(publish 权限)→ 存进仓库
+#      Settings → Secrets → Actions,名字 NPM_TOKEN
+# 发版流程:npm version patch && git push --follow-tags
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+  id-token: write # npm publish --provenance 需要 OIDC
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      # 装上 tmux/zsh 让集成测试真跑(缺了它们测试会自动跳过,但跑上更稳)
+      - run: sudo apt-get update && sudo apt-get install -y tmux zsh
+
+      - run: npm ci
+
+      - run: npm run check
+
+      - name: tag 必须与 package.json 版本一致
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::tag v$TAG_VERSION 与 package.json 的 $PKG_VERSION 不一致"
+            exit 1
+          fi
+
+      - run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

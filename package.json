@@ -1,22 +1,33 @@
 {
   "name": "agent-remote",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
   "description": "手机遥控本机 tmux 里的 coding agent（Claude Code / Codex），以 pane_id 为绑定单位",
   "engines": {
     "node": ">=22.18.0"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fingergohappy/agent-remote.git"
+  },
   "bin": {
     "agent-remote": "./src/main.ts"
   },
+  "files": [
+    "src",
+    "hooks",
+    ".env.example",
+    "systemd"
+  ],
   "scripts": {
     "start": "node src/main.ts",
     "build": "tsc -p tsconfig.build.json",
     "start:dist": "node dist/main.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --test 'test/**/*.test.ts'",
-    "check": "npm run typecheck && npm test"
+    "check": "npm run typecheck && npm test",
+    "prepublishOnly": "npm run check",
+    "sync:plugins": "cp -f hooks/agent-remote-hook.sh hooks/claude-hook.sh plugins/claude/scripts/ && cp -f hooks/agent-remote-hook.sh hooks/codex-hook.sh plugins/codex/scripts/"
   },
   "dependencies": {
     "grammy": "^1.30.0"

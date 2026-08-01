@@ -1,0 +1,7 @@
+{
+  "name": "agent-remote",
+  "version": "0.1.0",
+  "description": "手机遥控 tmux 里的 Claude Code。把 hook 事件（会话/完成/等待输入）POST 给本机 agent-remote 常驻服务，由它转发到 Telegram。服务未运行时 hook 静默跳过，不影响 Claude。阻塞式手机授权（PreToolUse）不在插件里 —— 用 `node src/main.ts setup --approval` 按需安装。",
+  "author": { "name": "fingergohappy" },
+  "homepage": "https://github.com/fingergohappy/agent-remote"
+}

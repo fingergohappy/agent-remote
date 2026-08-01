@@ -1,0 +1,11 @@
+{
+  "name": "agent-remote",
+  "owner": { "name": "fingergohappy" },
+  "plugins": [
+    {
+      "name": "agent-remote",
+      "source": "./plugins/claude",
+      "description": "手机遥控 tmux 里的 Claude Code：hook 事件推送到本机 agent-remote 服务（Telegram Bot）。需先安装并运行 agent-remote 常驻服务。"
+    }
+  ]
+}
