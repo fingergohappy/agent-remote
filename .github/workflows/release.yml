@@ -44,5 +44,10 @@ jobs:
             exit 1
           fi
 
-      # OIDC 认证,不需要任何 secret;provenance 在 trusted publishing 下自动生成
+      # 正常态走 OIDC(trusted publishing),不需要任何 secret。
+      # 下面的 env 只为首发引导:npm 限制「包必须已存在」才能配 trusted
+      # publisher,所以 v0.1.0 用一次性 token 发;配好 trusted publisher 后
+      # 删掉这两行 env 并撤销 token,之后永久免 token。
       - run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
