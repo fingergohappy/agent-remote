@@ -97,7 +97,10 @@ export async function listPanes(): Promise<TmuxPane[]> {
   const panes: TmuxPane[] = [];
   for (const line of r.stdout.split('\n')) {
     if (!line.trim()) continue;
-    const parts = line.split(SEP);
+    // tmux ≤3.4 会把格式串里的控制字符转成八进制字面量（\x1f → 反斜杠+037），
+    // 3.5+ 才原样输出。两种都认。title 恰好含字面 "\037" 文本的风险，
+    // 与 title 含真 \x1f 同级 —— 选 \x1f 时就已接受（见 SEP 注释）。
+    const parts = line.includes(SEP) ? line.split(SEP) : line.split('\\037');
     if (parts.length < 9) continue;
     const [paneId, session, windowS, indexS, fg, pidS, tty, title, cwd] = parts as [
       string,
