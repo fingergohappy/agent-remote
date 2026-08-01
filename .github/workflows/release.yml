@@ -1,8 +1,8 @@
-# push v* tag → 发布 npm 包。
+# push v* tag → 发布 npm 包(trusted publishing / OIDC,免 token)。
 # 前置(一次性):
-#   1. 仓库推到 GitHub
-#   2. npmjs.com 生成 granular access token(publish 权限)→ 存进仓库
-#      Settings → Secrets → Actions,名字 NPM_TOKEN
+#   1. 首个版本本地手动 npm publish(trusted publishing 配不了还不存在的包)
+#   2. npmjs.com → 包 Settings → Trusted Publisher:
+#      GitHub Actions / fingergohappy / agent-remote / release.yml
 # 发版流程:npm version patch && git push --follow-tags
 name: release
 
@@ -25,6 +25,9 @@ jobs:
           node-version: 22
           registry-url: https://registry.npmjs.org
 
+      # trusted publishing 需要 npm ≥ 11.5.1,node 22 自带的是 10.x
+      - run: npm install -g npm@latest
+
       # 装上 tmux/zsh 让集成测试真跑(缺了它们测试会自动跳过,但跑上更稳)
       - run: sudo apt-get update && sudo apt-get install -y tmux zsh
 
@@ -41,6 +44,5 @@ jobs:
             exit 1
           fi
 
-      - run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # OIDC 认证,不需要任何 secret;provenance 在 trusted publishing 下自动生成
+      - run: npm publish --access public

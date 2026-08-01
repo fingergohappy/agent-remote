@@ -1,5 +1,5 @@
 {
-  "name": "agent-remote",
+  "name": "@fingergohappy2026/agent-remote",
   "version": "0.1.0",
   "type": "module",
   "description": "手机遥控本机 tmux 里的 coding agent（Claude Code / Codex），以 pane_id 为绑定单位",
