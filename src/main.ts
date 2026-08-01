@@ -18,6 +18,7 @@ import { handleEvent } from './app/notify-flow.ts';
 import { handleMirrored } from './app/mirror-flow.ts';
 import type { AppContext } from './app/context.ts';
 import { ensureDir } from './infra/state-fs.ts';
+import { initI18n } from './i18n.ts';
 import { logger, setLogLevel } from './infra/logger.ts';
 import { registerProvider } from './providers/registry.ts';
 import { claudeProvider } from './providers/claude/index.ts';
@@ -88,6 +89,7 @@ async function main(): Promise<void> {
   const config = loadConfig();
   setLogLevel(config.logLevel);
   ensureDir(config.home, 0o700);
+  initI18n(join(config.home, 'lang.json'));
 
   // 2. providers
   registerProviders();

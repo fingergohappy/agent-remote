@@ -2,6 +2,7 @@
 import type { AppContext } from './context.ts';
 import { logger } from '../infra/logger.ts';
 import { getProvider } from '../providers/registry.ts';
+import { t } from '../i18n.ts';
 import { escapeHtml } from '../telegram/format.ts';
 
 const log = logger('decision-flow');
@@ -16,20 +17,20 @@ export async function resolveDecision(
 ): Promise<DecisionOutcome> {
   const pending = ctx.broker.get(args.correlationId);
   if (!pending) {
-    return { ok: false, message: '请求已过期。' };
+    return { ok: false, message: t('decision-expired') };
   }
   if (pending.resolvedWith) {
-    return { ok: false, message: '已处理。' };
+    return { ok: false, message: t('decision-done') };
   }
 
   const provider = getProvider(pending.event.providerId);
   if (!provider?.resolveDecision) {
-    return { ok: false, message: `${pending.event.providerId} 不支持结构化决策。` };
+    return { ok: false, message: t('no-structured-decision', { provider: pending.event.providerId }) };
   }
 
   const result = await provider.resolveDecision(pending.event, args.decisionId);
   if (!result.ok) {
-    return { ok: false, message: result.note ?? '决策失败' };
+    return { ok: false, message: result.note ?? t('decision-failed') };
   }
 
   const settled = ctx.broker.settle(
@@ -39,7 +40,7 @@ export async function resolveDecision(
     result.note,
   );
   if (!settled) {
-    return { ok: false, message: '请求已失效。' };
+    return { ok: false, message: t('decision-invalid') };
   }
 
   log.info('决策已下发', { correlationId: args.correlationId, decisionId: args.decisionId });
@@ -54,11 +55,11 @@ export async function resolveDecision(
         chatId: pending.chatId,
         threadId: pending.threadId,
         editMessageId: pending.messageId,
-        text: `🔐 <b>${result.note ?? '已处理'}</b>\n<s>${escapeHtml(pending.event.summary ?? '')}</s>`,
+        text: `🔐 <b>${result.note ?? t('decision-handled')}</b>\n<s>${escapeHtml(pending.event.summary ?? '')}</s>`,
         parseMode: 'HTML',
       })
       .catch((err) => log.warn('编辑决策消息失败', err));
   }
 
-  return { ok: true, note: result.note ?? '已处理' };
+  return { ok: true, note: result.note ?? t('decision-handled') };
 }

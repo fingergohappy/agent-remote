@@ -4,6 +4,7 @@ import type { Config } from '../config.ts';
 import type { TopicManager } from '../app/context.ts';
 import type { InlineButton, Transport } from '../core/egress-queue.ts';
 import type { TypingSender } from '../core/typing.ts';
+import { noteLanguageCode, tIn, type Lang } from '../i18n.ts';
 import { logger } from '../infra/logger.ts';
 import {
   closeTopic,
@@ -100,22 +101,28 @@ export function installAuth(bot: Bot, config: Config): void {
       log.warn('拒绝未授权 chat', { userId, chatId });
       return;
     }
+    // 过了鉴权的每条 update 都带客户端语言 —— auto 模式据此切界面语言
+    noteLanguageCode(ctx.from?.language_code);
     await next();
   });
 }
 
 export async function setCommandMenu(bot: Bot): Promise<void> {
   try {
-    await bot.api.setMyCommands([
-      { command: 'agents', description: '列出并绑定 agent' },
-      { command: 'status', description: '当前绑定状态' },
-      { command: 'history', description: '同步绑定前的历史' },
-      { command: 'notify', description: '推送级别：全量 / 只推要事 / 静音' },
-      { command: 'unbind', description: '解绑当前话题' },
-      { command: 'rebind', description: '绑回上次那个 agent' },
-      { command: 'cleanup', description: '清掉失效绑定' },
-      { command: 'start', description: '使用说明' },
-    ]);
+    const menu = (lang: Lang): { command: string; description: string }[] => [
+      { command: 'agents', description: tIn(lang, 'menu-agents') },
+      { command: 'status', description: tIn(lang, 'menu-status') },
+      { command: 'history', description: tIn(lang, 'menu-history') },
+      { command: 'notify', description: tIn(lang, 'menu-notify') },
+      { command: 'unbind', description: tIn(lang, 'menu-unbind') },
+      { command: 'rebind', description: tIn(lang, 'menu-rebind') },
+      { command: 'cleanup', description: tIn(lang, 'menu-cleanup') },
+      { command: 'lang', description: tIn(lang, 'menu-lang') },
+      { command: 'start', description: tIn(lang, 'menu-start') },
+    ];
+    // 命令菜单由 Telegram 按客户端语言选：默认英文，中文客户端拿 zh 一套
+    await bot.api.setMyCommands(menu('en'));
+    await bot.api.setMyCommands(menu('zh'), { language_code: 'zh' });
   } catch (err) {
     log.warn('setMyCommands 失败', err);
   }

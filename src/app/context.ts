@@ -80,6 +80,7 @@ export const CB = {
   unbind: (threadId: number): string => `u:${threadId}`,
   topicDelete: (threadId: number): string => `td:${threadId}`,
   notifyLevel: (level: string): string => `nl:${level}`,
+  lang: (mode: string): string => `lg:${mode}`,
   refresh: (): string => 'ag:refresh',
 } as const;
 
@@ -91,12 +92,17 @@ export type ParsedCallback =
   | { kind: 'unbind'; threadId: number }
   | { kind: 'topic-delete'; threadId: number }
   | { kind: 'notify-level'; level: 'off' | 'important' | 'info' }
+  | { kind: 'lang'; mode: 'auto' | 'zh' | 'en' }
   | { kind: 'refresh' }
   | null;
 
 export function parseCallback(data: string): ParsedCallback {
   if (data === 'ag:refresh') return { kind: 'refresh' };
   if (data.startsWith('b:')) return { kind: 'bind', paneId: data.slice(2) };
+  if (data.startsWith('lg:')) {
+    const mode = data.slice(3);
+    return mode === 'auto' || mode === 'zh' || mode === 'en' ? { kind: 'lang', mode } : null;
+  }
   if (data.startsWith('nl:')) {
     // 旧消息按钮上可能还挂着更名前的 nl:verbose —— 认作 info
     const raw = data.slice(3);

@@ -16,6 +16,7 @@ import { buildHistoryPage, HISTORY_PAGE_SIZE, syncHistory } from '../app/history
 import type { NotifyLevel } from '../config.ts';
 import type { InlineButton } from '../core/egress-queue.ts';
 import { displayOf, paneAlive } from '../infra/tmux.ts';
+import { langMode, noteLanguageCode, setLangMode, t, type LangMode } from '../i18n.ts';
 import { logger } from '../infra/logger.ts';
 import { formatBindingStatus } from './format.ts';
 
@@ -74,13 +75,6 @@ async function reply(ctx: Context, text: string, parseMode: 'HTML' | undefined =
   });
 }
 
-const START_TEXT = [
-  '<b>agent-remote</b> · tmux 里的 agent 遥控器',
-  '',
-  '/agents 选择并绑定，之后在其话题内直接输入。',
-  '默认全量转播，可用 /notify 调整。',
-  '绑定前的记录可用 /history 同步。',
-].join('\n');
 
 /**
  * 输入框下面那排常驻按钮。
@@ -93,31 +87,36 @@ const START_TEXT = [
  * `message:text` 那条 `if (text.startsWith('/')) return` 才会放行给命令处理器，
  * 否则会被当成给 agent 的话直接写进 pane。中文标签在这里是不能用的。
  */
-const COMMAND_KEYBOARD: ReplyKeyboardMarkup = {
-  keyboard: [[{ text: '/agents' }, { text: '/notify' }]],
-  resize_keyboard: true, // 压到最矮，别占半屏
-  is_persistent: true, // 一直显示，不是发一次就收
-  input_field_placeholder: '输入即发送给绑定的 agent',
-};
+function commandKeyboard(): ReplyKeyboardMarkup {
+  return {
+    keyboard: [[{ text: '/agents' }, { text: '/notify' }]],
+    resize_keyboard: true, // 压到最矮，别占半屏
+    is_persistent: true, // 一直显示，不是发一次就收
+    input_field_placeholder: t('input-placeholder'),
+  };
+}
 
-const NOTIFY_LABEL: Record<NotifyLevel, string> = {
-  info: '📢 全量转播',
-  important: '🔔 只推完成 / 等待 / 授权 / 失败',
-  off: '🔇 静音',
-};
-
-const NOTIFY_HELP = [
-  '📢 <b>info</b> 全量，含 agent 每条回复',
-  '🔔 <b>important</b> 只推完成 / 等待 / 授权 / 失败',
-  '🔇 <b>off</b> 不推',
-].join('\n');
+function notifyLabel(level: NotifyLevel): string {
+  return t(level === 'info' ? 'level-info' : level === 'important' ? 'level-important' : 'level-off');
+}
 
 function notifyLevelButtons(current: NotifyLevel): InlineButton[] {
   const mark = (l: NotifyLevel, text: string): string => (l === current ? `✅ ${text}` : text);
   return [
-    { text: mark('info', '📢 全量'), callbackData: CB.notifyLevel('info') },
-    { text: mark('important', '🔔 只推要事'), callbackData: CB.notifyLevel('important') },
-    { text: mark('off', '🔇 静音'), callbackData: CB.notifyLevel('off') },
+    { text: mark('info', t('btn-info')), callbackData: CB.notifyLevel('info') },
+    { text: mark('important', t('btn-important')), callbackData: CB.notifyLevel('important') },
+    { text: mark('off', t('btn-off')), callbackData: CB.notifyLevel('off') },
+  ];
+}
+
+/** /lang 面板：跟随 Telegram / 中文 / English，选完即焚 */
+function langButtons(): InlineButton[] {
+  const mode = langMode();
+  const mark = (m: LangMode, text: string): string => (m === mode ? `✅ ${text}` : text);
+  return [
+    { text: mark('auto', t('lang-auto')), callbackData: CB.lang('auto') },
+    { text: mark('zh', t('lang-zh')), callbackData: CB.lang('zh') },
+    { text: mark('en', t('lang-en')), callbackData: CB.lang('en') },
   ];
 }
 
@@ -148,11 +147,11 @@ export function registerHandlers(bot: Bot, app: AppContext): void {
   // 重发会把用户收起来的键盘又弹开。
   bot.command('start', async (ctx) => {
     const threadId = threadIdOf(ctx.message);
-    await ctx.reply(START_TEXT, {
+    await ctx.reply(t('start-text'), {
       ...(threadId ? { message_thread_id: threadId } : {}),
       parse_mode: 'HTML',
       link_preview_options: { is_disabled: true },
-      reply_markup: COMMAND_KEYBOARD,
+      reply_markup: commandKeyboard(),
     });
   });
 
@@ -169,11 +168,11 @@ export function registerHandlers(bot: Bot, app: AppContext): void {
     const threadId = threadIdOf(ctx.message);
     const outcome = await unbind(app, { chatId, threadId });
     if (!outcome) {
-      await reply(ctx, '此话题未绑定。');
+      await reply(ctx, t('topic-not-bound'));
       return;
     }
 
-    const head = `🔓 已解绑 <code>${outcome.removed.paneId}</code>`;
+    const head = t('unbound-head', { pane: outcome.removed.paneId });
 
     if (outcome.topicClosed || !threadId) {
       await reply(ctx, head);
@@ -183,9 +182,9 @@ export function registerHandlers(bot: Bot, app: AppContext): void {
     await app.egress.enqueue({
       chatId,
       threadId,
-      text: `${head}\n/rebind 可恢复。`,
+      text: `${head}${t('rebind-hint')}`,
       parseMode: 'HTML',
-      buttons: [[{ text: '🗑 删除话题', callbackData: CB.topicDelete(threadId) }]],
+      buttons: [[{ text: t('delete-topic-btn'), callbackData: CB.topicDelete(threadId) }]],
     });
   });
 
@@ -204,19 +203,19 @@ export function registerHandlers(bot: Bot, app: AppContext): void {
     const threadId = threadIdOf(ctx.message);
 
     if (!threadId) {
-      await reply(ctx, '/rebind 需在工位话题内使用。');
+      await reply(ctx, t('rebind-in-topic'));
       return;
     }
 
     const current = app.store.getByThread(chatId, threadId);
     if (current) {
-      await reply(ctx, `已绑定 <code>${current.paneId}</code>。`);
+      await reply(ctx, t('already-bound', { pane: current.paneId }));
       return;
     }
 
     const last = app.store.getReleased(chatId, threadId);
     if (!last) {
-      await reply(ctx, '无可恢复的记录，请用 /agents 选择。');
+      await reply(ctx, t('nothing-to-rebind'));
       return;
     }
 
@@ -227,8 +226,11 @@ export function registerHandlers(bot: Bot, app: AppContext): void {
       log.info('rebind 成功', { paneId: last.paneId, threadId });
       await reply(
         ctx,
-        `✅ 绑回 <code>${outcome.binding.paneId}</code> · ${outcome.binding.providerId} · ` +
-          `<code>${outcome.binding.display}</code>`,
+        t('bound-receipt', {
+          pane: outcome.binding.paneId,
+          provider: outcome.binding.providerId,
+          display: outcome.binding.display,
+        }),
       );
       return;
     }
@@ -242,14 +244,14 @@ export function registerHandlers(bot: Bot, app: AppContext): void {
     await app.egress
       .enqueue({
         chatId,
-        text: `🗑 <code>${last.paneId}</code> 已不存在，话题「${last.title}」一并删除。`,
+        text: t('rebind-gone-deleted', { pane: last.paneId, title: last.title }),
         parseMode: 'HTML',
       })
       .catch(() => undefined);
 
     const ok = await app.topics.deleteTopic(chatId, threadId);
     if (!ok) {
-      await reply(ctx, `<code>${last.paneId}</code> 已不存在。话题删除失败，请手动长按删除。`);
+      await reply(ctx, t('rebind-gone-manual', { pane: last.paneId }));
     }
   });
 
@@ -261,15 +263,15 @@ export function registerHandlers(bot: Bot, app: AppContext): void {
 
     const total = app.store.list(chatId).length;
     if (!total) {
-      await reply(ctx, '无绑定。');
+      await reply(ctx, t('no-bindings'));
       return;
     }
 
-    await reply(ctx, `核对 ${total} 条…（存活话题会多出一条「话题已修改」，忽略即可）`);
+    await reply(ctx, t('cleanup-progress', { n: total }));
     const { checked, removed } = await pruneStaleBindings(app, chatId);
 
     if (!removed.length) {
-      await reply(ctx, `✅ ${checked} 个话题均存在。`);
+      await reply(ctx, t('cleanup-all-ok', { n: checked }));
       return;
     }
 
@@ -285,7 +287,7 @@ export function registerHandlers(bot: Bot, app: AppContext): void {
     if (!chatId) return;
     const binding = app.store.getByThread(chatId, threadIdOf(ctx.message));
     if (!binding) {
-      await reply(ctx, '未绑定，请用 /agents 选择。');
+      await reply(ctx, t('not-bound-pick'));
       return;
     }
     const [alive, display] = await Promise.all([
@@ -305,7 +307,7 @@ export function registerHandlers(bot: Bot, app: AppContext): void {
     const threadId = threadIdOf(ctx.message);
     const binding = app.store.getByThread(chatId, threadId);
     if (!binding) {
-      await reply(ctx, '请先绑定：/agents');
+      await reply(ctx, t('bind-first'));
       return;
     }
     const arg = Number((ctx.match as string | undefined)?.trim());
@@ -332,16 +334,30 @@ export function registerHandlers(bot: Bot, app: AppContext): void {
     const threadId = threadIdOf(ctx.message);
     const binding = app.store.getByThread(chatId, threadId);
     if (!binding) {
-      await reply(ctx, '未绑定。');
+      await reply(ctx, t('not-bound'));
       return;
     }
 
     await app.egress.enqueue({
       chatId,
       threadId: threadId || undefined,
-      text: `当前 <b>${NOTIFY_LABEL[binding.notifyLevel]}</b>\n\n${NOTIFY_HELP}`,
+      text: `${t('notify-current', { label: notifyLabel(binding.notifyLevel) })}\n\n${t('notify-help')}`,
       parseMode: 'HTML',
       buttons: [notifyLevelButtons(binding.notifyLevel)],
+    });
+  });
+
+  // 界面语言：菜单点选，选完即焚（同 /notify 的交互约定）
+  bot.command('lang', async (ctx) => {
+    const chatId = chatIdOf(ctx);
+    if (!chatId) return;
+    const threadId = threadIdOf(ctx.message);
+    await app.egress.enqueue({
+      chatId,
+      threadId: threadId || undefined,
+      text: `<b>${t('lang-title')}</b>`,
+      parseMode: 'HTML',
+      buttons: [langButtons()],
     });
   });
 
@@ -366,7 +382,7 @@ export function registerHandlers(bot: Bot, app: AppContext): void {
       // 命令台（All / General）里没有绑定是正常的 —— 那里只该发命令。
       // 降级模式下 threadId 0 是真工位，会走到上面的成功分支，不会到这儿。
       if (result.reason === 'no_binding' && threadId === 0) {
-        await reply(ctx, '命令台仅接受命令，请在话题内与 agent 对话。');
+        await reply(ctx, t('cmd-only-here'));
         return;
       }
       // 这个话题以前绑过 → 直接告诉他一条命令就能回来，别让他去 /agents 里重认
@@ -374,7 +390,7 @@ export function registerHandlers(bot: Bot, app: AppContext): void {
       await reply(
         ctx,
         last
-          ? `未绑定。上次为 <code>${last.paneId}</code>，/rebind 恢复，或 /agents 更换。`
+          ? t('was-bound-hint', { pane: last.paneId })
           : result.message,
       );
       return;
@@ -408,7 +424,7 @@ export function registerHandlers(bot: Bot, app: AppContext): void {
       .enqueue({
         chatId,
         threadId,
-        text: '已解绑。/rebind 可恢复。',
+        text: t('unbound-rebind'),
       })
       .catch(() => undefined);
   });
@@ -427,7 +443,7 @@ export function registerHandlers(bot: Bot, app: AppContext): void {
     const data = ctx.callbackQuery.data;
     const parsed = parseCallback(data);
     if (!chatId || !parsed) {
-      await ctx.answerCallbackQuery({ text: '无法识别的操作' }).catch(() => undefined);
+      await ctx.answerCallbackQuery({ text: t('unknown-action') }).catch(() => undefined);
       return;
     }
 
@@ -436,7 +452,7 @@ export function registerHandlers(bot: Bot, app: AppContext): void {
     try {
       switch (parsed.kind) {
         case 'refresh': {
-          await ctx.answerCallbackQuery({ text: '刷新中…' });
+          await ctx.answerCallbackQuery({ text: t('refreshing') });
           await refreshList(app, ctx, chatId, threadId);
           return;
         }
@@ -451,14 +467,14 @@ export function registerHandlers(bot: Bot, app: AppContext): void {
           // 一律用顶部 toast（不带 show_alert）：自己飘一下就没，不打断动作。
           // show_alert 是个要点「确定」的模态框 —— 绑定这种顺手操作不配拦一次点击。
           if (outcome.ok && outcome.reused) {
-            await ctx.answerCallbackQuery({ text: `已绑定至 ${outcome.binding.title}` });
+            await ctx.answerCallbackQuery({ text: t('bound-toast', { title: outcome.binding.title }) });
             // 能走到这儿说明列表把已绑的显示成了 ➕，正是该刷新的时候
             await refreshList(app, ctx, chatId, threadId);
             return;
           }
 
           await ctx.answerCallbackQuery({
-            text: outcome.ok ? `✅ ${outcome.binding.title}` : '绑定失败',
+            text: outcome.ok ? `✅ ${outcome.binding.title}` : t('bind-failed'),
           });
 
           if (!outcome.ok) {
@@ -480,13 +496,13 @@ export function registerHandlers(bot: Bot, app: AppContext): void {
           await refreshList(app, ctx, chatId, threadId);
 
           const lines = [
-            `✅ 已绑定 <code>${b.paneId}</code> · ${b.providerId} · <code>${b.display}</code>`,
+            t('bound-receipt', { pane: b.paneId, provider: b.providerId, display: b.display }),
           ];
           if (outcome.degraded) {
-            lines.push('', '⚠️ 此会话不支持 Topics，消息均在主聊天流。');
+            lines.push('', t('bound-degraded'));
           }
           if (outcome.replaced) {
-            lines.push('', 'ℹ️ 已从其他话题迁移。');
+            lines.push('', t('bound-migrated'));
           }
 
           await app.egress.enqueue({
@@ -499,7 +515,7 @@ export function registerHandlers(bot: Bot, app: AppContext): void {
                 {
                   // h:（入口）会新发一条分页视图；hp:（导航）才原地编辑，
                   // 绝不能让这颗按钮把绑定回执本身改写掉
-                  text: '📜 浏览历史',
+                  text: t('browse-history'),
                   callbackData: CB.history(HISTORY_PAGE_SIZE),
                 },
               ],
@@ -521,13 +537,13 @@ export function registerHandlers(bot: Bot, app: AppContext): void {
 
         case 'history': {
           // 旧消息上遗留的一次性投影按钮：兼容为打开分页视图（尾页）
-          await ctx.answerCallbackQuery({ text: '读取中…' });
+          await ctx.answerCallbackQuery({ text: t('history-loading') });
           const binding = app.store.getByThread(chatId, threadId);
           if (!binding) {
             await app.egress.enqueue({
               chatId,
               threadId: threadId || undefined,
-              text: '未绑定。',
+              text: t('not-bound'),
             });
             return;
           }
@@ -546,7 +562,7 @@ export function registerHandlers(bot: Bot, app: AppContext): void {
         case 'history-page': {
           const binding = app.store.getByThread(chatId, threadId);
           if (!binding) {
-            await ctx.answerCallbackQuery({ text: '未绑定' });
+            await ctx.answerCallbackQuery({ text: t('not-bound') });
             return;
           }
           const view = await buildHistoryPage(binding, parsed.page, parsed.size);
@@ -568,14 +584,30 @@ export function registerHandlers(bot: Bot, app: AppContext): void {
           return;
         }
 
+        case 'lang': {
+          setLangMode(parsed.mode);
+          // auto 模式立即用本次点击者的客户端语言，不等下一条消息
+          if (parsed.mode === 'auto') noteLanguageCode(ctx.from?.language_code);
+          await ctx.answerCallbackQuery({
+            text: parsed.mode === 'auto' ? t('lang-auto') : t(`lang-${parsed.mode}`),
+          });
+          const langPanel = ctx.callbackQuery.message;
+          if (langPanel) {
+            await ctx.api
+              .deleteMessage(langPanel.chat.id, langPanel.message_id)
+              .catch(() => undefined);
+          }
+          return;
+        }
+
         case 'notify-level': {
           const binding = app.store.getByThread(chatId, threadId);
           if (!binding) {
-            await ctx.answerCallbackQuery({ text: '未绑定' });
+            await ctx.answerCallbackQuery({ text: t('not-bound') });
             return;
           }
           app.store.patch(chatId, threadId, { notifyLevel: parsed.level });
-          await ctx.answerCallbackQuery({ text: NOTIFY_LABEL[parsed.level] });
+          await ctx.answerCallbackQuery({ text: notifyLabel(parsed.level) });
           // 选完即焚：级别面板是一次性交互，结果已在 toast 里，
           // 留着只会占屏、日后被误点。删除失败（超 48h 等）就随它去。
           const panel = ctx.callbackQuery.message;
@@ -590,7 +622,7 @@ export function registerHandlers(bot: Bot, app: AppContext): void {
           const target = app.store.getByThread(chatId, parsed.threadId);
           if (!target) {
             // 多半是连点了两下，第一下已经解完了 —— 刷新列表把真实状态给他看
-            await ctx.answerCallbackQuery({ text: '已解绑' });
+            await ctx.answerCallbackQuery({ text: t('unbound-toast') });
           } else {
             // remember：话题还在，发 /rebind 就能绑回来
             forgetBinding(app, target, { keepIndex: true, remember: true });
@@ -604,7 +636,7 @@ export function registerHandlers(bot: Bot, app: AppContext): void {
         case 'topic-delete': {
           const target = app.store.getByThread(chatId, parsed.threadId);
           await ctx.answerCallbackQuery({
-            text: target ? `解绑 ${target.paneId} 并删除话题…` : '删除中…',
+            text: target ? t('unbind-delete-progress', { pane: target.paneId }) : t('deleting'),
           });
           // 还绑着就先解绑，别留下悬空绑定。
           // 注意不走 unbind()：那里会按 closeTopicOnUnbind 先试着「关闭」话题，
@@ -618,14 +650,14 @@ export function registerHandlers(bot: Bot, app: AppContext): void {
           await app.egress
             .enqueue({
               chatId,
-              text: '🗑 话题已删除。',
+              text: t('topic-deleted'),
             })
             .catch(() => undefined);
 
           const ok = await app.topics.deleteTopic(chatId, parsed.threadId);
           if (!ok) {
             await app.egress
-              .enqueue({ chatId, text: '话题删除失败，请手动长按删除。' })
+              .enqueue({ chatId, text: t('topic-delete-failed') })
               .catch(() => undefined);
           }
 
@@ -648,7 +680,7 @@ export function registerHandlers(bot: Bot, app: AppContext): void {
       }
     } catch (err) {
       log.error('callback 处理失败', err);
-      await ctx.answerCallbackQuery({ text: '处理失败，详见日志' }).catch(() => undefined);
+      await ctx.answerCallbackQuery({ text: t('failed-see-log') }).catch(() => undefined);
     }
   });
 

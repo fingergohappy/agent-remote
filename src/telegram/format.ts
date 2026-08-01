@@ -6,6 +6,7 @@ import { homedir } from 'node:os';
 import type { AgentInstance } from '../core/discover.ts';
 import type { Binding } from '../core/bind-store.ts';
 import type { AgentEventType, HistoryItem, NormalizedEvent } from '../providers/types.ts';
+import { t, type MsgKey } from '../i18n.ts';
 
 export function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -42,16 +43,9 @@ const ICONS: Record<AgentEventType, string> = {
   ended: '🏁',
 };
 
-const TYPE_LABEL: Record<AgentEventType, string> = {
-  started: '开始',
-  output: '输出',
-  waiting: '等待输入',
-  permission: '需要授权',
-  question: '提问',
-  completed: '完成',
-  failed: '失败',
-  ended: '结束',
-};
+function typeLabel(type: AgentEventType): string {
+  return t(`ev-${type}` as MsgKey);
+}
 
 export function eventIcon(type: AgentEventType): string {
   return ICONS[type];
@@ -60,7 +54,7 @@ export function eventIcon(type: AgentEventType): string {
 /** Topic 内的事件消息：已经在对应工位了，不重复报 pane 坐标。 */
 export function formatEvent(event: NormalizedEvent, opts: { withTarget?: string } = {}): string {
   const icon = ICONS[event.type];
-  const label = TYPE_LABEL[event.type];
+  const label = typeLabel(event.type);
   const head = opts.withTarget
     ? `${icon} <b>${label}</b> · <code>${escapeHtml(opts.withTarget)}</code>`
     : `${icon} <b>${label}</b>`;
@@ -112,17 +106,13 @@ export function formatAgentList(
   opts: { disposableThread?: boolean } = {},
 ): string {
   if (!instances.length) {
-    return [
-      '未发现 agent。',
-      '· 是否运行在 tmux 中',
-      '· session 是否在 <code>SESSION_ALLOWLIST</code> 内',
-    ].join('\n');
+    return t('no-agents');
   }
 
   const boundCount = instances.filter((i) => bound.has(i.paneId)).length;
   const head = boundCount
-    ? `🤖 <b>${instances.length}</b> 个 agent · 已绑定 <b>${boundCount}</b>`
-    : `🤖 <b>${instances.length}</b> 个 agent`;
+    ? t('agents-head-bound', { n: instances.length, m: boundCount })
+    : t('agents-head', { n: instances.length });
 
   const lines = [head];
 
@@ -143,18 +133,18 @@ export function formatAgentList(
     }
   }
 
-  lines.push('', '<i>🟠 claude · 🟢 codex · ➕ 绑定 · 🔓 解绑</i>');
+  lines.push('', `<i>${t('agents-legend')}</i>`);
   return lines.join('\n');
 }
 
 export function formatBindingStatus(b: Binding, alive: boolean, display: string | null): string {
   const lines = [
     `<b>${escapeHtml(b.title)}</b>`,
-    `${alive ? '✅' : '❌ 已消失'} <code>${escapeHtml(b.paneId)}</code> ` +
+    `${alive ? t('status-alive') : t('status-gone')} <code>${escapeHtml(b.paneId)}</code> ` +
       `${escapeHtml(b.providerId)} · <code>${escapeHtml(display ?? b.display)}</code>`,
   ];
   if (b.cwd) lines.push(`<i>${escapeHtml(shortenPath(b.cwd))}</i>`);
-  lines.push(`推送 <code>${b.notifyLevel}</code>`);
+  lines.push(`${t('status-notify')} <code>${b.notifyLevel}</code>`);
   return lines.join('\n');
 }
 
@@ -225,7 +215,7 @@ export function formatMirrored(item: HistoryItem): string | null {
 }
 
 export function historyHeader(count: number, source?: string): string {
-  const head = `—— 绑定前最近 ${count} 条 ——`;
+  const head = t('history-header', { n: count });
   return source ? `${head}\n<i>${escapeHtml(source)}</i>` : head;
 }
 
@@ -294,7 +284,10 @@ export function layoutHistoryPages(
 
   const flush = (): void => {
     if (!buf) return;
-    const label = startNo === lastNo ? `第 ${startNo} 条` : `第 ${startNo}–${lastNo} 条`;
+    const label =
+      startNo === lastNo
+        ? t('item-one', { n: startNo })
+        : t('items-range', { a: startNo, b: lastNo });
     pages.push({ body: buf, label });
     buf = '';
     count = 0;
@@ -321,7 +314,7 @@ export function layoutHistoryPages(
     segs.forEach((seg, si) => {
       pages.push({
         body: wrapEscaped(item, seg),
-        label: `第 ${no} 条 · ${si + 1}/${segs.length} 段`,
+        label: t('item-part', { n: no, i: si + 1, k: segs.length }),
       });
     });
   });

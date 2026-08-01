@@ -3,6 +3,7 @@ import type { AppContext } from './context.ts';
 import { forgetBinding } from './bind-flow.ts';
 import { sendToBinding } from '../core/send.ts';
 import { logger } from '../infra/logger.ts';
+import { t } from '../i18n.ts';
 
 const log = logger('chat-flow');
 
@@ -19,7 +20,7 @@ export async function handleUserText(
     return {
       ok: false,
       reason: 'no_binding',
-      message: '没绑定，/agents 挑一个。',
+      message: t('not-bound-pick'),
     };
   }
 
@@ -36,7 +37,7 @@ export async function handleUserText(
       return {
         ok: false,
         reason: 'send_failed',
-        message: `❌ ${result.error}\n已自动解绑。`,
+        message: t('auto-unbound', { err: result.error }),
       };
     }
     // agent 退了但 pane 还在：不解绑（多半是 Ctrl-C 后马上会重启），

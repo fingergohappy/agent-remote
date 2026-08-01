@@ -9,6 +9,7 @@ import type {
 import { detectClaude } from './detect.ts';
 import { normalizeClaude } from './normalize.ts';
 import { fetchClaudeHistory, pollClaudeTranscript } from './history.ts';
+import { t } from '../../i18n.ts';
 
 function permissionResponse(decision: 'allow' | 'deny', reason: string): unknown {
   return {
@@ -43,10 +44,10 @@ export const claudeProvider: AgentProvider = {
   buildDecisionUi(event: NormalizedEvent): DecisionUiSpec | null {
     if (event.type !== 'permission' || !event.blocking) return null;
     return {
-      prompt: event.summary ? `请求授权：${event.summary}` : '请求授权',
+      prompt: event.summary ? t('perm-prompt', { summary: event.summary }) : t('perm-prompt-bare'),
       buttons: [
-        { id: 'allow', label: '✅ 允许' },
-        { id: 'deny', label: '⛔ 拒绝' },
+        { id: 'allow', label: t('allow') },
+        { id: 'deny', label: t('deny') },
       ],
     };
   },
@@ -55,18 +56,18 @@ export const claudeProvider: AgentProvider = {
     if (decisionId === 'allow') {
       return {
         ok: true,
-        hookResponse: permissionResponse('allow', '已在 Telegram 批准'),
-        note: '已允许',
+        hookResponse: permissionResponse('allow', t('approved-via-tg')),
+        note: t('allowed'),
       };
     }
     if (decisionId === 'deny') {
       return {
         ok: true,
-        hookResponse: permissionResponse('deny', '已在 Telegram 拒绝'),
-        note: '已拒绝',
+        hookResponse: permissionResponse('deny', t('denied-via-tg')),
+        note: t('denied'),
       };
     }
-    return { ok: false, note: `未知决策: ${decisionId}` };
+    return { ok: false, note: t('unknown-decision', { id: decisionId }) };
   },
 
   /**

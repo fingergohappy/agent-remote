@@ -10,6 +10,7 @@ import { logger } from '../infra/logger.ts';
 import { getProvider } from '../providers/registry.ts';
 import type { AgentProvider, HistoryResult } from '../providers/types.ts';
 import { escapeHtml, formatHistory, historyHeader, layoutHistoryPages } from '../telegram/format.ts';
+import { t } from '../i18n.ts';
 
 const log = logger('history-flow');
 
@@ -66,7 +67,7 @@ export async function syncHistory(
   if (!result.items.length) {
     return {
       ok: false,
-      message: '未找到会话记录。',
+      message: t('history-none'),
     };
   }
 
@@ -91,7 +92,7 @@ export async function syncHistory(
   await ctx.egress.enqueue({
     chatId: binding.chatId,
     threadId,
-    text: '—— 以上为历史，以下实时 ——',
+    text: t('history-divider'),
   });
 
   return { ok: true, count: result.items.length };
@@ -120,16 +121,19 @@ export async function buildHistoryPage(
 
   const items = result.items.filter((i) => i.kind !== 'tool');
   const layout = layoutHistoryPages(items, { size });
-  if (!layout.length) return { ok: false, message: '未找到会话记录。' };
+  if (!layout.length) return { ok: false, message: t('history-none') };
 
   const pages = layout.length;
   const page = pageReq <= 0 ? pages : Math.min(Math.max(pageReq, 1), pages);
   const cur = layout[page - 1]!;
 
   const atWindowCap = items.length >= HISTORY_WINDOW;
-  const header =
-    `📜 <b>${page}/${pages}</b> 页 · ${cur.label}` +
-    `（共 ${items.length}${atWindowCap ? '+' : ''} 条）`;
+  const header = t('history-page-header', {
+    page,
+    pages,
+    label: cur.label,
+    total: `${items.length}${atWindowCap ? '+' : ''}`,
+  });
   const source = result.source ? `\n<i>${escapeHtml(result.source)}</i>` : '';
 
   // 翻页按钮不做禁用态（Telegram 没有）：边界上点⏮/◀ 会编辑出相同内容，

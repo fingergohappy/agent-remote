@@ -5,6 +5,7 @@
  * 本文件是唯一允许认识这些字段名的地方（design.md §6.7 反模式）。
  */
 import type { NormalizedEvent } from '../types.ts';
+import { t } from '../../i18n.ts';
 
 export type ClaudeHookRaw = {
   hook_event_name?: string;
@@ -59,19 +60,19 @@ export function normalizeClaude(raw: unknown): NormalizedEvent | null {
 
   switch (hook) {
     case 'SessionStart':
-      return { ...base, type: 'started', summary: '会话开始' };
+      return { ...base, type: 'started', summary: t('sum-session-start') };
 
     case 'UserPromptSubmit':
       // 不产生消息，只用于会话索引更新与镜像 kick。
-      return { ...base, type: 'output', silent: true, summary: '用户在终端输入' };
+      return { ...base, type: 'output', silent: true, summary: t('sum-user-typed') };
 
     case 'Notification': {
       const msg = r.message ? firstLine(r.message) : '';
       if (msg && PERMISSION_HINT.test(msg)) {
-        return { ...base, type: 'permission', summary: msg || '需要授权' };
+        return { ...base, type: 'permission', summary: msg || t('sum-need-permission') };
       }
       if (!msg || IDLE_HINT.test(msg)) {
-        return { ...base, type: 'waiting', summary: msg || '等待输入' };
+        return { ...base, type: 'waiting', summary: msg || t('sum-waiting') };
       }
       return { ...base, type: 'waiting', summary: msg };
     }
@@ -96,19 +97,21 @@ export function normalizeClaude(raw: unknown): NormalizedEvent | null {
       };
 
     case 'Stop':
-      return { ...base, type: 'completed', summary: '任务完成' };
+      return { ...base, type: 'completed', summary: t('sum-task-done') };
 
     case 'SubagentStop':
-      return { ...base, type: 'output', summary: '子任务完成' };
+      return { ...base, type: 'output', summary: t('sum-subtask-done') };
 
     case 'PreCompact':
-      return { ...base, type: 'output', summary: '上下文压缩' };
+      return { ...base, type: 'output', summary: t('sum-compact') };
 
     case 'SessionEnd':
       return {
         ...base,
         type: 'ended',
-        summary: r.reason ? `会话结束（${firstLine(r.reason, 80)}）` : '会话结束',
+        summary: r.reason
+          ? t('sum-session-end-reason', { reason: firstLine(r.reason, 80) })
+          : t('sum-session-end'),
       };
 
     default:

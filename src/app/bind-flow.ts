@@ -16,6 +16,7 @@ import { listPanes } from '../infra/tmux.ts';
 import { snapshotProcesses } from '../infra/process-tree.ts';
 import { formatAgentList } from '../telegram/format.ts';
 import { logger } from '../infra/logger.ts';
+import { t } from '../i18n.ts';
 
 const log = logger('bind-flow');
 
@@ -90,12 +91,12 @@ export function agentButtons(
     return link ? [{ text: `🔗 ${label}`, url: link }, release] : [release];
   });
 
-  const tail: InlineButton[] = [{ text: '🔄 刷新', callbackData: CB.refresh() }];
+  const tail: InlineButton[] = [{ text: t('refresh'), callbackData: CB.refresh() }];
   // 在 All 里发消息时 Telegram 会自己开一个话题（客户端行为，Bot 拦不住）。
   // 这个话题还没绑 agent，给个一键清掉的出口，免得攒一堆空壳。
   if (opts.disposableThreadId) {
     tail.push({
-      text: '🗑 删除空话题',
+      text: t('delete-empty-topic'),
       callbackData: CB.topicDelete(opts.disposableThreadId),
     });
   }
@@ -129,7 +130,7 @@ export async function sendAgentList(
           linkFor: (threadId) => ctx.topics.linkTo(target.chatId, threadId),
         })
       : disposableThreadId
-        ? [[{ text: '🗑 删除空话题', callbackData: CB.topicDelete(disposableThreadId) }]]
+        ? [[{ text: t('delete-empty-topic'), callbackData: CB.topicDelete(disposableThreadId) }]]
         : undefined,
   });
 }

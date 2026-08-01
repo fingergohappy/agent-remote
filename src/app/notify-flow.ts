@@ -12,6 +12,7 @@ import { logger } from '../infra/logger.ts';
 import { getProvider } from '../providers/registry.ts';
 import type { NormalizedEvent } from '../providers/types.ts';
 import { escapeHtml, formatEvent } from '../telegram/format.ts';
+import { t } from '../i18n.ts';
 
 const log = logger('notify-flow');
 
@@ -92,7 +93,7 @@ async function emitDecision(
   const { messageId } = await ctx.egress.enqueue({
     chatId: bound.chatId,
     threadId: bound.threadId || undefined,
-    text: `🔐 <b>授权</b> ${escapeHtml(ui.prompt)}`,
+    text: t('perm-title', { prompt: escapeHtml(ui.prompt) }),
     parseMode: 'HTML',
     buttons,
   });

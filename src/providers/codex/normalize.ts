@@ -7,6 +7,7 @@
  * 因此 Codex 侧目前只有「完成」语义，没有权限/提问回调 —— capability 如实声明为 false。
  */
 import type { NormalizedEvent } from '../types.ts';
+import { t } from '../../i18n.ts';
 
 export type CodexNotifyRaw = {
   type?: string;
@@ -47,17 +48,17 @@ export function normalizeCodex(raw: unknown): NormalizedEvent | null {
         ...base,
         type: 'completed',
         correlationId: r['turn-id'],
-        summary: last ? clip(last) : '任务完成',
+        summary: last ? clip(last) : t('sum-task-done'),
       };
 
     // 前向兼容：codex 若新增事件类型，先按语义粗分，不认识就不产事件。
     case 'agent-turn-failed':
     case 'turn-failed':
-      return { ...base, type: 'failed', summary: last ? clip(last) : '任务失败' };
+      return { ...base, type: 'failed', summary: last ? clip(last) : t('sum-task-failed') };
 
     case 'agent-turn-aborted':
     case 'turn-aborted':
-      return { ...base, type: 'ended', summary: '任务中断' };
+      return { ...base, type: 'ended', summary: t('sum-task-aborted') };
 
     default:
       return null;
