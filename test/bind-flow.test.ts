@@ -12,6 +12,12 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
+
+// 每个测试文件一个私有 tmux server：test 文件是并行跑的，共用默认 socket 时
+// 谁的会话最后退出谁就把 server 带走，别的文件的 listPanes 会撞上
+// 「error connecting / no server running」。CI 上没有常驻 server，全靠这里隔离。
+process.env.TMUX_TMPDIR = mkdtempSync(join(tmpdir(), 'ar-bind-tmux-'));
+delete process.env.TMUX;
 import {
   agentButtons,
   bindPane,
@@ -143,8 +149,10 @@ function harness(
 
 test('bind-flow 选工位', { skip: !hasTmux() }, async (t) => {
   const session = `agent-remote-bind-${process.pid}`;
-  tmux(['new-session', '-d', '-s', session, '-x', '80', '-y', '24', 'sh']);
-  tmux(['split-window', '-t', session, 'sh']);
+  // pane 里跑 sleep 而不是 sh：这些用例只要 pane 存在且长命，跟 shell 的
+  // 交互语义无关；CI 的 pty 上 dash 会立刻退出，带着会话和 server 一起消失
+  tmux(['new-session', '-d', '-s', session, '-x', '80', '-y', '24', 'sleep 600']);
+  tmux(['split-window', '-t', session, 'sleep 600']);
   t.after(() => {
     try {
       tmux(['kill-session', '-t', session]);
@@ -356,7 +364,7 @@ test('bind-flow 选工位', { skip: !hasTmux() }, async (t) => {
     // pane 那一侧随时可查（tmux 随便问），所以这条路不依赖任何探测，
     // 60s 一轮的 reconcileBindings 就能清。真机验，不是嘴上说。
     const h = harness(true);
-    tmux(['split-window', '-t', session, 'sh']);
+    tmux(['split-window', '-t', session, 'sleep 600']);
     await new Promise((r) => setTimeout(r, 400));
     const all = tmux(['list-panes', '-t', session, '-F', '#{pane_id}']).trim().split('\n');
     const doomed = all[all.length - 1]!;
@@ -386,7 +394,7 @@ test('bind-flow 选工位', { skip: !hasTmux() }, async (t) => {
     // 这是最坏组合。关键在顺序：store.remove 在 enqueue 之前，
     // 所以「通知发不出去」绝不会让绑定活下来。
     const h = harness(true);
-    tmux(['split-window', '-t', session, 'sh']);
+    tmux(['split-window', '-t', session, 'sleep 600']);
     await new Promise((r) => setTimeout(r, 400));
     const all = tmux(['list-panes', '-t', session, '-F', '#{pane_id}']).trim().split('\n');
     const doomed = all[all.length - 1]!;

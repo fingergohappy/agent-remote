@@ -39,20 +39,48 @@ Codex ≥ 0.124 有和 Claude 同形的 hooks 引擎，事件与权限回调都�
 
 ## 快速开始
 
+### 1. 安装
+
 ```bash
+# 方式 A：npm（推荐）
+npm install -g @fingergohappy2026/agent-remote
+
+# 方式 B：源码
+git clone https://github.com/fingergohappy/agent-remote && cd agent-remote
 npm install
-
-mkdir -p ~/.agent-remote && chmod 700 ~/.agent-remote
-cp .env.example ~/.agent-remote/.env && chmod 600 ~/.agent-remote/.env
-# 填 TELEGRAM_BOT_TOKEN / ALLOWED_USERS / INGRESS_SECRET(openssl rand -hex 32)
-
-node src/main.ts doctor    # 看配置 + 当前能发现哪些 agent
-node src/main.ts           # 启动
+alias agent-remote='node src/main.ts'   # 下文命令两种方式通用
 ```
 
-装 hook：`node src/main.ts setup` 一键合并写入两侧配置（`--approval` 加手机授权，
-`--uninstall` 摘除）；手工路线与字段说明见 [hooks/INSTALL.md](hooks/INSTALL.md)。
-常驻：见 [systemd/README.md](systemd/README.md)。
+### 2. 一键配置（.env + 两侧 hook）
+
+```bash
+agent-remote setup
+```
+
+它做三件事：初始化 `~/.agent-remote/.env`（自动生成 `INGRESS_SECRET`）；把 hook
+合并写入 `~/.claude/settings.json` 与 `~/.codex/hooks.json` —— 幂等、不碰你已有的
+其它 hook、改前自动备份。`--approval` 追加「手机上批 Claude 工具调用」，
+`--uninstall` 干净摘除。手工装 hook 与逐字段说明见 [hooks/INSTALL.md](hooks/INSTALL.md)，
+插件方式见 [plugins/README.md](plugins/README.md)。
+
+然后补上 `~/.agent-remote/.env` 里的两个必填项：
+
+- `TELEGRAM_BOT_TOKEN` —— 找 @BotFather 建一个独立 Bot
+- `ALLOWED_USERS` —— 你自己的 Telegram user id（白名单）
+
+### 3. 启动服务
+
+```bash
+agent-remote doctor    # 自检：配置齐不齐、能发现哪些 agent
+agent-remote           # 前台启动
+```
+
+常驻运行（开机自启、崩溃拉起）见 [systemd/README.md](systemd/README.md)。
+
+### 4. 手机上开工
+
+tmux 里跑起 claude / codex → 给 Bot 发 `/agents` → 点按钮绑定 →
+对话全文进话题、打字回传终端、授权请求手机上点。
 
 **要多工位就得有话题（Topics）**，两条路都行：
 

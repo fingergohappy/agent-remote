@@ -88,7 +88,10 @@ export async function listPanes(): Promise<TmuxPane[]> {
   const r = await run(['list-panes', '-a', '-F', FIELDS]);
   if (r.code !== 0) {
     const msg = r.stderr.trim() || 'tmux list-panes failed';
-    if (/no server running/i.test(msg)) return [];
+    // 「没有 server」两种表现都算空列表：server 从未启动（error connecting，
+    // socket 文件不存在）和 server 刚退出（no server running）。
+    // 对 daemon 来说这不是错误 —— 没有 tmux 就是没有可遥控的 agent。
+    if (/no server running|error connecting/i.test(msg)) return [];
     throw new TmuxError(msg);
   }
   const panes: TmuxPane[] = [];

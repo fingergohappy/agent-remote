@@ -11,6 +11,13 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+
+// 私有 tmux socket 目录：这个文件不建会话，「pane 已死」用例恰恰需要
+// listPanes 稳定地看到一个空世界 —— 不隔离的话，本地会扫到开发者自己的
+// pane，CI 则因为并行测试的 server 生灭撞上 error connecting。
+process.env.TMUX_TMPDIR = mkdtempSync(join(tmpdir(), 'ar-chat-tmux-'));
+delete process.env.TMUX;
+
 import { handleUserText } from '../src/app/chat-flow.ts';
 import type { AppContext } from '../src/app/context.ts';
 import { loadConfig } from '../src/config.ts';
