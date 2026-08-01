@@ -3,16 +3,17 @@
  * 组装与启动（modules.md §8）：
  *   config → providers → bindings → ingress HTTP → telegram bot → reconcile → ready
  */
+import { join } from 'node:path';
 import { loadConfig, type Config } from './config.ts';
 import { AgentIndex } from './core/agent-index.ts';
-import { ActivityTracker } from './core/activity.ts';
 import { BindStore } from './core/bind-store.ts';
 import { DecisionBroker } from './core/decision-broker.ts';
 import { EchoGuard } from './core/echo-guard.ts';
 import { EgressQueue } from './core/egress-queue.ts';
 import { createIngressServer } from './core/ingress-http.ts';
 import { TranscriptWatcher } from './core/transcript-watcher.ts';
-import { handleThreadGone, reconcileBindings } from './app/bind-flow.ts';
+import { TypingIndicator } from './core/typing.ts';
+import { handleThreadGone, handleTopicClosedOnSend, reconcileBindings } from './app/bind-flow.ts';
 import { handleEvent } from './app/notify-flow.ts';
 import { handleMirrored } from './app/mirror-flow.ts';
 import type { AppContext } from './app/context.ts';
@@ -25,6 +26,7 @@ import {
   createBot,
   createTopicManager,
   createTransport,
+  createTypingSender,
   installAuth,
   setCommandMenu,
 } from './telegram/bot.ts';
@@ -52,7 +54,6 @@ async function runDoctor(): Promise<number> {
 
   const lines: string[] = [
     `home            ${config.home}`,
-    `runtime         ${config.runtimeDir}`,
     `ingress         http://${config.ingressHost}:${config.ingressPort}/ingress`,
     `bot token       ${config.botToken ? '已设置' : '❌ 缺失 TELEGRAM_BOT_TOKEN'}`,
     `allowed users   ${config.allowedUsers.length ? config.allowedUsers.join(',') : '❌ 缺失 ALLOWED_USERS'}`,
@@ -87,7 +88,6 @@ async function main(): Promise<void> {
   const config = loadConfig();
   setLogLevel(config.logLevel);
   ensureDir(config.home, 0o700);
-  ensureDir(config.runtimeDir, 0o700);
 
   // 2. providers
   registerProviders();
@@ -97,9 +97,8 @@ async function main(): Promise<void> {
   log.info(`载入 ${store.list().length} 条绑定`);
 
   const index = new AgentIndex();
-  const activity = new ActivityTracker(config.terminalActiveWindowMs);
   const echo = new EchoGuard();
-  const broker = new DecisionBroker(config.runtimeDir, config.decisionTimeoutMs);
+  const broker = new DecisionBroker(config.decisionTimeoutMs);
   broker.startGc();
 
   // 5a. bot（先建，egress 需要它的 api）
@@ -107,23 +106,29 @@ async function main(): Promise<void> {
   const egress = new EgressQueue(createTransport(bot.api), {
     // 话题被用户删掉后，发送会 400；借这个信号自动解绑
     onThreadGone: (chatId, threadId) => handleThreadGone(app, { chatId, threadId }),
+    // 非白名单成员关闭话题时收不到 forum_topic_closed（auth 拦掉了），发送失败兜底
+    onTopicClosed: (chatId, threadId) => handleTopicClosedOnSend(app, { chatId, threadId }),
   });
 
   // 对话镜像：Claude 的 Stop hook 不含回复正文，只能从 transcript 追
   const mirror = new TranscriptWatcher({
     store,
     onMessages: (messages) => handleMirrored(app, messages),
+    // 游标落盘：重启不丢「上次读到哪」，间隙写入的对话照常镜像
+    cursorFile: join(config.home, 'mirror-cursors.json'),
   });
+
+  const typing = new TypingIndicator(createTypingSender(bot.api));
 
   const app: AppContext = {
     config,
     store,
     index,
-    activity,
     echo,
     broker,
     egress,
     mirror,
+    typing,
     topics: createTopicManager(bot.api),
   };
 
@@ -152,7 +157,11 @@ async function main(): Promise<void> {
 
   // 6. 对话镜像：主路径是 hook 触发 + fs.watch，定时轮询只兜底
   mirror.start(config.mirrorIntervalMs);
-  log.info(`transcript 镜像已启动（事件驱动，兜底轮询 ${config.mirrorIntervalMs}ms）`);
+  log.info(
+    config.mirrorIntervalMs > 0
+      ? `transcript 镜像已启动（事件驱动，兜底轮询 ${config.mirrorIntervalMs}ms）`
+      : 'transcript 镜像已启动（仅事件驱动，无兜底轮询）',
+  );
 
   // 7. reconcile
   const reconcile = async (): Promise<void> => {
@@ -176,9 +185,14 @@ async function main(): Promise<void> {
     log.info(`收到 ${signal}，退出中`);
     clearInterval(timer);
     mirror.stop();
+    typing.stopAll();
     broker.stopGc();
     server.close();
-    void bot.stop().finally(() => process.exit(0));
+    void (async () => {
+      await bot.stop().catch(() => undefined); // 先停收新消息
+      await egress.drain(3000).catch(() => undefined); // 再把已排队的发完，别丢在半路
+      process.exit(0);
+    })();
   };
   process.once('SIGINT', () => shutdown('SIGINT'));
   process.once('SIGTERM', () => shutdown('SIGTERM'));

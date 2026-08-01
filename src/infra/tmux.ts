@@ -18,6 +18,13 @@ export type TmuxPane = {
   display: string; // session:window.index
 };
 
+/**
+ * 字段分隔符用 \x1f（unit separator），不用 \t：
+ * pane_title 是应用可任意设置的（shell PROMPT、vim titlestring），
+ * 里面混进一个 tab 就会让 cwd 错位到 title 的后半段，绑定与 detect 全跟着错。
+ */
+const SEP = '\x1f';
+
 const FIELDS = [
   '#{pane_id}',
   '#{session_name}',
@@ -28,7 +35,7 @@ const FIELDS = [
   '#{pane_tty}',
   '#{pane_title}',
   '#{pane_current_path}',
-].join('\t');
+].join(SEP);
 
 export class TmuxError extends Error {}
 
@@ -87,7 +94,7 @@ export async function listPanes(): Promise<TmuxPane[]> {
   const panes: TmuxPane[] = [];
   for (const line of r.stdout.split('\n')) {
     if (!line.trim()) continue;
-    const parts = line.split('\t');
+    const parts = line.split(SEP);
     if (parts.length < 9) continue;
     const [paneId, session, windowS, indexS, fg, pidS, tty, title, cwd] = parts as [
       string,
@@ -208,16 +215,6 @@ export async function sendKeys(
     if (r2.code !== 0) {
       throw new TmuxError(r2.stderr.trim() || 'send-keys Enter failed');
     }
-  }
-}
-
-/** 发送具名按键序列（如 Escape / Down / Enter），用于 provider 的 fallback 决策路径。 */
-export async function sendNamedKeys(paneId: string, keys: string[]): Promise<void> {
-  if (!isPaneId(paneId)) throw new TmuxError(`非法 pane id: ${paneId}`);
-  for (const key of keys) {
-    const r = await run(['send-keys', '-t', paneId, key]);
-    if (r.code !== 0) throw new TmuxError(r.stderr.trim() || `send-keys ${key} failed`);
-    await new Promise((res) => setTimeout(res, 60));
   }
 }
 

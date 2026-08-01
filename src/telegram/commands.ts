@@ -40,6 +40,31 @@ function chatIdOf(ctx: Context): string | null {
   return id === undefined ? null : String(id);
 }
 
+/** 引用别太长：agent 要的是上下文定位，不是整段重放 */
+const QUOTE_MAX = 600;
+
+/**
+ * 用户 reply 某条消息时，把被引用的内容取出来（`> ` 前缀的引用块）。
+ *
+ * 两个坑：
+ * - 话题里**每条**消息技术上都是对话题根消息的 reply（forum 的实现机制），
+ *   reply_to 的 message_id 等于 threadId 时不是用户的引用，必须忽略；
+ * - 用户可以「部分引用」（选中一段再回复），那时优先带他选的那段（msg.quote）。
+ */
+export function quotedReply(msg: Message, threadId: number): string | null {
+  const re = msg.reply_to_message;
+  if (!re || re.message_id === threadId) return null;
+
+  const raw = (msg.quote?.text ?? re.text ?? re.caption ?? '').trim();
+  if (!raw) return null;
+
+  const clipped = raw.length > QUOTE_MAX ? raw.slice(0, QUOTE_MAX - 1) + '…' : raw;
+  return clipped
+    .split('\n')
+    .map((line) => `> ${line}`)
+    .join('\n');
+}
+
 async function reply(ctx: Context, text: string, parseMode: 'HTML' | undefined = 'HTML'): Promise<void> {
   const threadId = threadIdOf(ctx.message ?? ctx.callbackQuery?.message);
   await ctx.reply(text, {
@@ -76,13 +101,13 @@ const COMMAND_KEYBOARD: ReplyKeyboardMarkup = {
 };
 
 const NOTIFY_LABEL: Record<NotifyLevel, string> = {
-  verbose: '📢 全量转播',
+  info: '📢 全量转播',
   important: '🔔 只推完成 / 等待 / 授权 / 失败',
   off: '🔇 静音',
 };
 
 const NOTIFY_HELP = [
-  '📢 <b>verbose</b> 全量，含 agent 每条回复',
+  '📢 <b>info</b> 全量，含 agent 每条回复',
   '🔔 <b>important</b> 只推完成 / 等待 / 授权 / 失败',
   '🔇 <b>off</b> 不推',
 ].join('\n');
@@ -90,7 +115,7 @@ const NOTIFY_HELP = [
 function notifyLevelButtons(current: NotifyLevel): InlineButton[] {
   const mark = (l: NotifyLevel, text: string): string => (l === current ? `✅ ${text}` : text);
   return [
-    { text: mark('verbose', '📢 全量'), callbackData: CB.notifyLevel('verbose') },
+    { text: mark('info', '📢 全量'), callbackData: CB.notifyLevel('info') },
     { text: mark('important', '🔔 只推要事'), callbackData: CB.notifyLevel('important') },
     { text: mark('off', '🔇 静音'), callbackData: CB.notifyLevel('off') },
   ];
@@ -300,7 +325,7 @@ export function registerHandlers(bot: Bot, app: AppContext): void {
     });
   });
 
-  // 推送级别是唯一的开关 —— 不带参数就把当前级别和按钮摆出来
+  // 推送级别是唯一的开关 —— 只出菜单点选，不吃参数（带了参数也一律忽略）
   bot.command('notify', async (ctx) => {
     const chatId = chatIdOf(ctx);
     if (!chatId) return;
@@ -311,21 +336,10 @@ export function registerHandlers(bot: Bot, app: AppContext): void {
       return;
     }
 
-    const arg = ((ctx.match as string | undefined) ?? '').trim();
-    if (arg === 'off' || arg === 'important' || arg === 'verbose') {
-      app.store.patch(chatId, threadId, { notifyLevel: arg });
-      await reply(ctx, `${NOTIFY_LABEL[arg]}`);
-      return;
-    }
-    if (arg) {
-      await reply(ctx, '/notify off | important | verbose');
-      return;
-    }
-
     await app.egress.enqueue({
       chatId,
       threadId: threadId || undefined,
-      text: `推送级别 <code>${binding.notifyLevel}</code>\n\n${NOTIFY_HELP}`,
+      text: `当前 <b>${NOTIFY_LABEL[binding.notifyLevel]}</b>\n\n${NOTIFY_HELP}`,
       parseMode: 'HTML',
       buttons: [notifyLevelButtons(binding.notifyLevel)],
     });
@@ -340,7 +354,13 @@ export function registerHandlers(bot: Bot, app: AppContext): void {
     if (!chatId) return;
 
     const threadId = threadIdOf(ctx.message);
-    const result = await handleUserText(app, { chatId, threadId, text });
+    // reply 的引用不在 text 里 —— 不带上的话 agent 只见回话不见上下文
+    const quoted = quotedReply(ctx.message, threadId);
+    const result = await handleUserText(app, {
+      chatId,
+      threadId,
+      text: quoted ? `${quoted}\n${text}` : text,
+    });
 
     if (!result.ok) {
       // 命令台（All / General）里没有绑定是正常的 —— 那里只该发命令。
@@ -555,15 +575,13 @@ export function registerHandlers(bot: Bot, app: AppContext): void {
             return;
           }
           app.store.patch(chatId, threadId, { notifyLevel: parsed.level });
-          await ctx.answerCallbackQuery({ text: parsed.level });
-          await app.egress.enqueue({
-            chatId,
-            threadId: threadId || undefined,
-            editMessageId: ctx.callbackQuery.message?.message_id,
-            text: `推送级别 <code>${parsed.level}</code>\n\n${NOTIFY_HELP}`,
-            parseMode: 'HTML',
-            buttons: [notifyLevelButtons(parsed.level)],
-          });
+          await ctx.answerCallbackQuery({ text: NOTIFY_LABEL[parsed.level] });
+          // 选完即焚：级别面板是一次性交互，结果已在 toast 里，
+          // 留着只会占屏、日后被误点。删除失败（超 48h 等）就随它去。
+          const panel = ctx.callbackQuery.message;
+          if (panel) {
+            await ctx.api.deleteMessage(panel.chat.id, panel.message_id).catch(() => undefined);
+          }
           return;
         }
 

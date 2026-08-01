@@ -1,16 +1,12 @@
 /**
  * 「等人点按钮」的短生命周期状态（modules.md §4.6）。
  *
- * 阻塞的 hook 子进程长轮询 `GET /decision/:id`；用户点按钮后 core 唤醒它。
- * 同时把结果落到 $XDG_RUNTIME_DIR/agent-remote/decisions/（0700，不用世界可写的 /tmp）。
+ * 纯内存：阻塞的 hook 请求被 ingress hold 住，用户点按钮后由这里唤醒。
+ * 不落盘 —— 服务重启会断掉被 hold 的连接，hook 静默退 0，agent 退回本机
+ * TUI 的权限框，行为已经是安全的；持久化一个没人会再来读的决策没有意义。
  */
 import { randomBytes } from 'node:crypto';
-import { join } from 'node:path';
-import { ensureDir, removeFile, writeJsonAtomic } from '../infra/state-fs.ts';
-import { logger } from '../infra/logger.ts';
 import type { NormalizedEvent } from '../providers/types.ts';
-
-const log = logger('decision');
 
 export type PendingDecision = {
   correlationId: string;
@@ -33,14 +29,11 @@ export function newCorrelationId(): string {
 export class DecisionBroker {
   #pending = new Map<string, PendingDecision>();
   #waiters = new Map<string, Waiter[]>();
-  #dir: string;
   #timeoutMs: number;
   #gcTimer?: NodeJS.Timeout;
 
-  constructor(runtimeDir: string, timeoutMs: number) {
-    this.#dir = join(runtimeDir, 'decisions');
+  constructor(timeoutMs: number) {
     this.#timeoutMs = timeoutMs;
-    ensureDir(this.#dir, 0o700);
   }
 
   startGc(intervalMs = 30_000): void {
@@ -120,13 +113,6 @@ export class DecisionBroker {
 
     p.resolvedWith = { decisionId, response, note };
 
-    // 落盘：hook 若错过长轮询窗口（服务重启等）仍能读到
-    try {
-      writeJsonAtomic(join(this.#dir, `${correlationId}.json`), { decisionId, response }, 0o600);
-    } catch (err) {
-      log.warn('写决策文件失败', err);
-    }
-
     for (const waiter of this.#waiters.get(correlationId) ?? []) {
       waiter({ resolved: true, response });
     }
@@ -148,12 +134,11 @@ export class DecisionBroker {
   gcExpired(now = Date.now()): PendingDecision[] {
     const dropped: PendingDecision[] = [];
     for (const [id, p] of this.#pending) {
-      // 已决策的多留一会儿，避免 hook 重试时读不到
+      // 已决策的多留一会儿，避免用户在按钮上连点时读不到「已处理」状态
       const keepUntil = p.resolvedWith ? p.expiresAt + 60_000 : p.expiresAt;
       if (now > keepUntil) {
         this.#pending.delete(id);
         this.#waiters.delete(id);
-        removeFile(join(this.#dir, `${id}.json`));
         if (!p.resolvedWith) dropped.push(p);
       }
     }

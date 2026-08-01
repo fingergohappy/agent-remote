@@ -29,6 +29,13 @@ export type AgentSignature = {
 /** 进程名直接命中比命令行特征命中更可信，但差距小于一层深度的惩罚 */
 const COMM_BASE = 0.95;
 const ARGS_BASE = 0.92;
+
+/**
+ * args 命中只对「解释器起的包装器」有意义（node 跑的 claude/codex 启动器）。
+ * 不设这道闸，`less /notes/claude`、`tail -f codex` 这类查看同名文件的进程
+ * 也会被 args 正则认领 —— 绑上之后手机消息就直接打进 pager 了。
+ */
+const WRAPPER_COMM = /^(node|nodejs|bun|deno)$/;
 const DEPTH_PENALTY = 0.05;
 /** 深到离谱也保持在认领阈值之上——签名命中且过了三道门槛就该认领 */
 const MIN_CLAIM = 0.55;
@@ -81,7 +88,7 @@ export function detectForegroundAgent(
 
   for (const p of ctx.processTree) {
     const commHit = sig.comm.test(p.comm);
-    const argsHit = !commHit && sig.args.test(p.args);
+    const argsHit = !commHit && WRAPPER_COMM.test(p.comm) && sig.args.test(p.args);
     if (!commHit && !argsHit) continue;
     if (isStopped(p.stat)) continue;
     if (!onPaneTty(p.tty, ctx.paneTty)) continue;

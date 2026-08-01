@@ -95,16 +95,29 @@ export function isThreadGone(err: unknown): boolean {
   return /message thread not found|TOPIC_ID_INVALID|topic.*deleted/i.test(msg);
 }
 
+/**
+ * 话题被**关闭**了（不是删除）。白名单成员关话题会走 forum_topic_closed 事件；
+ * 但非白名单成员关的，auth 中间件把 service message 拦掉了，
+ * 只能在发送撞 400 时发现。和 gone 分开处理：closed 的历史都还在，可 reopen。
+ */
+export function isTopicClosed(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /TOPIC_CLOSED/i.test(msg);
+}
+
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 export type EgressOptions = {
   /** 话题已被用户删除时回调，让上层解绑 */
   onThreadGone?(chatId: string, threadId: number): void | Promise<void>;
+  /** 话题已被关闭（TOPIC_CLOSED）时回调，让上层解绑（与 forum_topic_closed 语义对齐） */
+  onTopicClosed?(chatId: string, threadId: number): void | Promise<void>;
 };
 
 export class EgressQueue {
   #transport: Transport;
   #onThreadGone: EgressOptions['onThreadGone'];
+  #onTopicClosed: EgressOptions['onTopicClosed'];
   /** 每个 thread 一条串行链，保证 Topic 内消息不乱序 */
   #chains = new Map<string, Promise<unknown>>();
   #lastSentAt = 0;
@@ -112,6 +125,13 @@ export class EgressQueue {
   constructor(transport: Transport, opts: EgressOptions = {}) {
     this.#transport = transport;
     this.#onThreadGone = opts.onThreadGone;
+    this.#onTopicClosed = opts.onTopicClosed;
+  }
+
+  /** 等已入队的消息发完（或超时），仅用于优雅退出。 */
+  async drain(timeoutMs = 3000): Promise<void> {
+    const all = Promise.all([...this.#chains.values()]);
+    await Promise.race([all, sleep(timeoutMs)]);
   }
 
   #key(chatId: string, threadId?: number): string {
@@ -141,7 +161,11 @@ export class EgressQueue {
 
   async #run(job: EgressJob): Promise<SendOutcome> {
     if (job.editMessageId !== undefined) {
-      return this.#withRetry(job, (payload) =>
+      // 编辑只能落在单条消息上：超长时保留首个切片（在换行处切），
+      // 静默截断胜过必然的 MESSAGE_TOO_LONG —— 后者会让「🔄 刷新」看起来点了没反应
+      const [head, ...overflow] = splitText(job.text);
+      const clipped = overflow.length ? { ...job, text: `${head}\n…` } : job;
+      return this.#withRetry(clipped, (payload) =>
         this.#transport.editMessage({
           chatId: job.chatId,
           messageId: job.editMessageId!,
@@ -212,6 +236,19 @@ export class EgressQueue {
         // 内容没变，Telegram 拒绝编辑 —— 目标状态已经达到了
         if (isNotModified(err)) {
           return { messageId: job.editMessageId ?? 0 };
+        }
+
+        // 话题被关闭（TOPIC_CLOSED 是明确状态，不是抖动，不用重试确认）：
+        // 解绑交给上层，这条内容降级到主聊天流，别让人什么都收不到
+        if (isTopicClosed(err) && payload.threadId && !threadDropped) {
+          log.info('话题已关闭，改投主聊天流并解绑', {
+            chatId: job.chatId,
+            threadId: payload.threadId,
+          });
+          await this.#onTopicClosed?.(job.chatId, payload.threadId);
+          threadDropped = true;
+          payload = { ...payload, threadId: undefined };
+          continue;
         }
 
         // 话题可能被删了。但「thread not found」也可能是瞬时抖动 ——

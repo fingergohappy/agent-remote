@@ -1,4 +1,4 @@
-/** transcript 镜像消息 → 对应话题。 */
+/** transcript 镜像消息 → 对应话题。绑定即推送，无静音揣测。 */
 import type { AppContext } from './context.ts';
 import type { MirroredMessage } from '../core/transcript-watcher.ts';
 import { formatMirrored } from '../telegram/format.ts';

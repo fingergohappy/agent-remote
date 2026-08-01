@@ -11,9 +11,19 @@ import { paneIdOfPid } from '../infra/tmux.ts';
 import { logger } from '../infra/logger.ts';
 import { getProvider } from '../providers/registry.ts';
 import type { NormalizedEvent } from '../providers/types.ts';
-import { formatEvent } from '../telegram/format.ts';
+import { escapeHtml, formatEvent } from '../telegram/format.ts';
 
 const log = logger('notify-flow');
+
+/** 这些事件意味着 agent 停下来了：完成/失败/会话结束/等输入/等授权/提问 */
+const STOP_TYPING_EVENTS = new Set<NormalizedEvent['type']>([
+  'completed',
+  'failed',
+  'ended',
+  'waiting',
+  'permission',
+  'question',
+]);
 
 async function resolvePaneId(ctx: AppContext, event: NormalizedEvent): Promise<string | undefined> {
   if (event.paneId) return event.paneId;
@@ -60,20 +70,15 @@ function refreshBindingFacts(ctx: AppContext, binding: Binding, event: Normalize
   return ctx.store.patch(binding.chatId, binding.threadId, patch) ?? binding;
 }
 
-function isFromTelegram(ctx: AppContext, binding: Binding): boolean {
-  if (!binding.lastTelegramSendAt) return false;
-  const at = Date.parse(binding.lastTelegramSendAt);
-  return Number.isFinite(at) && Date.now() - at < ctx.config.telegramOriginWindowMs;
-}
-
+/** 建 pending 并推按钮；返回是否真的建立了待决策（ingress 据此才 hold hook）。 */
 async function emitDecision(
   ctx: AppContext,
   bound: Binding,
   event: NormalizedEvent & { correlationId: string },
-): Promise<void> {
+): Promise<boolean> {
   const provider = getProvider(event.providerId);
   const ui = provider?.buildDecisionUi?.(event);
-  if (!ui) return;
+  if (!ui) return false;
 
   ctx.broker.create(event);
 
@@ -87,7 +92,7 @@ async function emitDecision(
   const { messageId } = await ctx.egress.enqueue({
     chatId: bound.chatId,
     threadId: bound.threadId || undefined,
-    text: `🔐 <b>授权</b> ${escapeSummary(ui.prompt)}`,
+    text: `🔐 <b>授权</b> ${escapeHtml(ui.prompt)}`,
     parseMode: 'HTML',
     buttons,
   });
@@ -97,17 +102,19 @@ async function emitDecision(
     threadId: bound.threadId || undefined,
     messageId,
   });
+  return true;
 }
 
-function escapeSummary(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
-
-/** 返回 `bound: false` 表示这个事件没有对应绑定 —— 调用方据此不要 hold 阻塞式 hook。 */
+/**
+ * 返回值给 ingress 用：
+ * `bound: false` = 事件没有对应绑定；
+ * `held: true`  = 已建 pending 并推了按钮，这次 hook 请求应该被 hold 住等决策。
+ * 两者必须分开 —— 「绑定了」不代表「建了待决策」，按 bound hold 会让 hook 白等 90s。
+ */
 export async function handleEvent(
   ctx: AppContext,
   event: NormalizedEvent,
-): Promise<{ bound: boolean }> {
+): Promise<{ bound: boolean; held: boolean }> {
   const paneId = await resolvePaneId(ctx, event);
   const resolved: NormalizedEvent = paneId ? { ...event, paneId } : event;
 
@@ -118,17 +125,12 @@ export async function handleEvent(
     cwd: resolved.cwd,
   });
 
-  // 「人在终端前」打点（D13）：silent 事件的唯一用途
-  if (resolved.silent && resolved.paneId) {
-    ctx.activity.noteLocalInput(resolved.paneId);
-  }
-
   // 没绑定就什么都不做 —— 不推送、不打扰。这个 agent 你没托管给 Bot，
   // 它在终端上自己跑自己的（阻塞式 hook 也不 hold，见 handleEvent 的返回值）。
   const binding = findBinding(ctx, resolved);
   if (!binding) {
     log.debug('事件无对应绑定，忽略', { type: resolved.type, paneId: resolved.paneId });
-    return { bound: false };
+    return { bound: false, held: false };
   }
 
   const bound = refreshBindingFacts(ctx, binding, resolved);
@@ -137,34 +139,41 @@ export async function handleEvent(
   // 放在 refreshBindingFacts 之后 —— 让这轮镜像用上刚更新的 transcriptPath。
   ctx.mirror?.kick();
 
+  // agent 停下来了（干完/出错/等人）→「正在输入…」熄灭。
+  // 放在策略过滤之前：事件即使被压制不推送，typing 也必须停。
+  if (STOP_TYPING_EVENTS.has(resolved.type)) {
+    ctx.typing?.stop(bound.chatId, bound.threadId || undefined);
+  }
+
   // 阻塞式授权：先建 pending，再推按钮；策略层不参与（永远要推）
   if (resolved.blocking && resolved.correlationId) {
     const provider = getProvider(resolved.providerId);
     if (provider?.capabilities.semanticPermission && provider.buildDecisionUi) {
-      await emitDecision(ctx, bound, resolved as NormalizedEvent & { correlationId: string });
-      return { bound: true };
+      const held = await emitDecision(
+        ctx,
+        bound,
+        resolved as NormalizedEvent & { correlationId: string },
+      );
+      return { bound: true, held };
     }
     log.warn('provider 不支持结构化授权，按普通事件处理', { providerId: resolved.providerId });
   }
 
-  // 镜像开着时，completed / output 这类事件的内容是重复的
-  const provider = getProvider(resolved.providerId);
+  // 镜像**真的在工作**时，completed / output 这类事件的内容是重复的。
+  // 必须问 watcher 的事实信号而不是 provider 的 capability ——
+  // 镜像失明（文件定位失败）时按能力判断会连唯一的通知也吞掉，用户什么都收不到。
   const mirrored =
-    bound.notifyLevel === 'verbose' &&
-    Boolean(provider?.capabilities.nativeTranscript && provider.pollNativeEnhancements);
+    bound.notifyLevel === 'info' && (ctx.mirror?.isMirroring(bound.paneId) ?? false);
 
   const decision = shouldEmit({
     event: resolved,
     mirrored,
     level: bound.notifyLevel,
-    terminalActive: resolved.paneId ? ctx.activity.isTerminalActive(resolved.paneId) : false,
-    fromTelegram: isFromTelegram(ctx, bound),
-    quietWhenTerminalActive: ctx.config.quietWhenTerminalActive,
   });
 
   if (!decision.emit) {
     log.debug('事件被策略丢弃', { type: resolved.type, reason: decision.reason });
-    return { bound: true };
+    return { bound: true, held: false };
   }
 
   await ctx.egress.enqueue({
@@ -174,5 +183,5 @@ export async function handleEvent(
     parseMode: 'HTML',
   });
 
-  return { bound: true };
+  return { bound: true, held: false };
 }

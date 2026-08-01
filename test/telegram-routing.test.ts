@@ -47,7 +47,7 @@ test('callback_data 编解码往返，且不超 Telegram 的 64 字节', () => {
     CB.historyPage(37, 50),
     CB.unbind(3793),
     CB.topicDelete(3732),
-    CB.notifyLevel('verbose'),
+    CB.notifyLevel('info'),
     CB.refresh(),
   ];
   for (const data of cases) {
@@ -74,6 +74,8 @@ test('callback_data 编解码往返，且不超 Telegram 的 64 字节', () => {
   // 解绑和删除只差一个字母，混了就是「本想断开却毁了历史」
   assert.notEqual(CB.unbind(3793), CB.topicDelete(3793));
   assert.deepEqual(parseCallback(CB.notifyLevel('off')), { kind: 'notify-level', level: 'off' });
+  // 更名前的旧按钮还挂在历史消息上，必须继续认
+  assert.deepEqual(parseCallback('nl:verbose'), { kind: 'notify-level', level: 'info' });
   assert.deepEqual(parseCallback(CB.refresh()), { kind: 'refresh' });
 });
 
@@ -109,4 +111,59 @@ test('话题配色：每个 provider 固定一色，且只用 Telegram 认的取
   assert.ok(codex && allowed.includes(codex));
   assert.notEqual(claude, codex, '两个 provider 得能分辨');
   assert.equal(providerTopicColor('unknown'), undefined, '不认识的交给 Telegram 随机配');
+});
+
+// ── reply 引用注入 ────────────────────────────────────────────────────────────
+
+import { quotedReply } from '../src/telegram/commands.ts';
+
+function replyMsg(over: {
+  replyToId?: number;
+  replyText?: string;
+  replyCaption?: string;
+  quote?: string;
+}): Message {
+  return {
+    message_id: 900,
+    date: 0,
+    chat: { id: 1, type: 'supergroup' },
+    ...(over.replyToId
+      ? {
+          reply_to_message: {
+            message_id: over.replyToId,
+            date: 0,
+            chat: { id: 1, type: 'supergroup' },
+            ...(over.replyText ? { text: over.replyText } : {}),
+            ...(over.replyCaption ? { caption: over.replyCaption } : {}),
+          },
+        }
+      : {}),
+    ...(over.quote ? { quote: { text: over.quote, position: 0 } } : {}),
+  } as unknown as Message;
+}
+
+test('reply 引用：真 reply 变引用块，话题根消息的假 reply 忽略', () => {
+  // 话题机制：每条消息都 reply 话题根（message_id === threadId）→ 不是用户引用
+  assert.equal(quotedReply(replyMsg({ replyToId: 42, replyText: 'root' }), 42), null);
+
+  const q = quotedReply(replyMsg({ replyToId: 7, replyText: '之前的回答' }), 42);
+  assert.equal(q, '> 之前的回答');
+});
+
+test('reply 引用：多行加前缀、超长截断、caption 兜底、部分引用优先', () => {
+  const multi = quotedReply(replyMsg({ replyToId: 7, replyText: 'a\nb' }), 0);
+  assert.equal(multi, '> a\n> b');
+
+  const long = quotedReply(replyMsg({ replyToId: 7, replyText: 'x'.repeat(2000) }), 0);
+  assert.ok(long!.length < 700 && long!.endsWith('…'));
+
+  assert.equal(quotedReply(replyMsg({ replyToId: 7, replyCaption: '图注' }), 0), '> 图注');
+
+  const partial = quotedReply(
+    replyMsg({ replyToId: 7, replyText: '整段很长的原文', quote: '选中的这句' }),
+    0,
+  );
+  assert.equal(partial, '> 选中的这句', '用户圈选了片段就带片段');
+
+  assert.equal(quotedReply(replyMsg({}), 0), null, '没 reply 就没引用');
 });

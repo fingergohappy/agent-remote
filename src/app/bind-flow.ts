@@ -8,9 +8,12 @@ import {
   instanceTitle,
   projectLabel,
   sortForDisplay,
+  verifyPresence,
   type AgentInstance,
 } from '../core/discover.ts';
 import type { InlineButton } from '../core/egress-queue.ts';
+import { listPanes } from '../infra/tmux.ts';
+import { snapshotProcesses } from '../infra/process-tree.ts';
 import { formatAgentList } from '../telegram/format.ts';
 import { logger } from '../infra/logger.ts';
 
@@ -36,7 +39,6 @@ export function forgetBinding(
 ): void {
   if (opts.remember) ctx.store.noteReleased(binding);
   ctx.store.remove(binding.chatId, binding.threadId);
-  ctx.activity.forget(binding.paneId);
   ctx.mirror?.forget(binding.paneId);
   ctx.echo.forget(binding.paneId);
   if (!opts.keepIndex) ctx.index.forget(binding.paneId);
@@ -219,6 +221,13 @@ export async function bindPane(
 
   const now = new Date().toISOString();
   const existing = ctx.store.getByThread(args.chatId, threadId);
+
+  // 会话事实（sessionId / transcriptPath）跟着 **pane** 走，不跟话题走：
+  // 绑定在话题间迁移时要继承，否则镜像与 /history 要退回 cwd 启发式直到下个 hook。
+  // 但 provider 变了（pane 里换跑了别的 agent）就不能带 —— 那是旧 agent 的会话。
+  const prior = ctx.store.getByPane(inst.paneId);
+  const inherit = prior?.providerId === inst.providerId ? prior : null;
+
   const binding: Binding = {
     chatId: args.chatId,
     threadId,
@@ -229,8 +238,8 @@ export async function bindPane(
     title,
     ownedByUs: false, // 接管已有 pane，关 Topic 不 kill（D3 / prior-art 建议 9）
     cwd: inst.cwd,
-    sessionId: existing?.paneId === inst.paneId ? existing.sessionId : undefined,
-    transcriptPath: existing?.paneId === inst.paneId ? existing.transcriptPath : undefined,
+    sessionId: inherit?.sessionId,
+    transcriptPath: inherit?.transcriptPath,
     notifyLevel: existing?.notifyLevel ?? ctx.config.defaultNotifyLevel,
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,
@@ -309,9 +318,19 @@ export async function pruneStaleBindings(
 
 /** 定期对账：pane 死了就解绑并通知（modules.md §8 步骤 6）。 */
 export async function reconcileBindings(ctx: AppContext): Promise<void> {
-  for (const binding of ctx.store.list()) {
-    const state = await ctx.store.validate(binding);
+  const bindings = ctx.store.list();
+  if (!bindings.length) return;
+
+  // 一轮 tmux + 一轮 ps，所有绑定共用快照
+  const panes = await listPanes();
+  const snap = await snapshotProcesses();
+
+  for (const binding of bindings) {
+    const state = await verifyPresence(binding, { panes, snap });
     if (state === 'ok') continue;
+    // agent 退了但 pane 还在：可能马上会重启（Ctrl-C 后续跑），
+    // 不拆绑定 —— send 路径已经挡住误发，这里拆了只会逼人反复重绑
+    if (state === 'agent_gone') continue;
 
     forgetBinding(ctx, binding);
 
@@ -356,6 +375,35 @@ export async function handleThreadGone(
     .enqueue({
       chatId: args.chatId,
       text: `🗑 话题已删，自动解绑 <code>${removed.paneId}</code>。`,
+      parseMode: 'HTML',
+    })
+    .catch(() => undefined);
+}
+
+/**
+ * 发送时撞上「话题已关闭」（TOPIC_CLOSED）。
+ *
+ * 白名单成员关话题会走 forum_topic_closed 事件正常解绑；但**非白名单成员**关的
+ * 话题收不到事件（auth 中间件拦掉了 service message），只能在发送失败时补救。
+ * 语义与 forum_topic_closed 对齐：解绑 + 记 released，pane 留在索引里。
+ */
+export async function handleTopicClosedOnSend(
+  ctx: AppContext,
+  args: { chatId: string; threadId: number },
+): Promise<void> {
+  const removed = ctx.store.getByThread(args.chatId, args.threadId);
+  if (!removed) return;
+
+  forgetBinding(ctx, removed, { keepIndex: true, remember: true });
+  log.info('话题已关闭（发送失败发现），自动解绑', {
+    paneId: removed.paneId,
+    threadId: args.threadId,
+  });
+
+  await ctx.egress
+    .enqueue({
+      chatId: args.chatId,
+      text: `🔒 话题已关闭，自动解绑 <code>${removed.paneId}</code>。/rebind 可恢复。`,
       parseMode: 'HTML',
     })
     .catch(() => undefined);

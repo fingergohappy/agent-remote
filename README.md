@@ -83,26 +83,26 @@ node src/main.ts           # 启动
 
 | level | 推什么 |
 |-------|--------|
-| `verbose`（默认） | 全量：agent 的每条回复、你在终端敲的话，加上要你动手的事件 |
+| `info`（默认） | 全量：agent 的每条回复、你在终端敲的话，加上要你动手的事件 |
 | `important` | 只推要你知道的：完成、等待输入、需要授权、提问、失败 |
 | `off` | 不推（仍可打字、仍可 `/history`） |
 
-verbose 下**不推**「✅ 完成」这类空洞事件 —— 回复原文镜像已经送到了，再补一条只是噪声。
+info 下**不推**「✅ 完成」这类空洞事件 —— 回复原文镜像已经送到了，再补一条只是噪声。
 `important` 下没有镜像，完成通知是唯一信号，照推。
 
 **agent 的回复是怎么拿到的**：Claude 的 `Stop` hook 只带 session_id / transcript_path，
-**不含回复正文**。所以 verbose 下另有一路 `core/transcript-watcher`，按 byte offset 增量读
+**不含回复正文**。所以 info 下另有一路 `core/transcript-watcher`，按 byte offset 增量读
 agent 自己的会话文件（Claude 的 jsonl / Codex 的 rollout），把新增的往来追加到话题。
-重启后从文件当前末尾开始跟，不回放历史 —— 要看之前的用 `/history`。
+镜像游标持久化在 `~/.agent-remote/mirror-cursors.json`：重启后从上次位置续读，
+间隙写入的对话不丢；只有首次见到某个 transcript 文件才从末尾起跟（不回放陈年历史）。
 
-可选的「人在终端前就别吵」（`QUIET_WHEN_TERMINAL_ACTIVE=true`，默认关）：检测到你刚在
-tmux 里给 agent 敲过字，`completed` / `output` 会被压制；但**授权和等待输入照推**。
+绑定即推送：不做「人在终端前」的揣测 —— 绑了就发，级别由 `/notify` 控制。
 
 ## 开发
 
 ```bash
 npm run typecheck   # tsc --noEmit
-npm test            # node:test，86 个用例
+npm test            # node:test，170+ 个用例
 npm run check       # 两个一起
 npm run build       # 编译到 dist/（生产可用 node dist/main.js）
 ```
@@ -126,6 +126,8 @@ hooks/             装到 agent 那边的薄脚本
 
 **依赖方向只许向下。** `providers/` 不得 import `telegram/`，`core/` 不得解析任何
 provider 私有字段 —— 加新 agent 应该只写一个 provider 包 + 注册一行，不改 bind/Topic/egress。
+例外说明：`telegram/format.ts` 是无副作用的纯文案层，`app/` 可以用它；
+`app/` 不得 import `telegram/` 的其它模块（bot / commands / topics 持有 grammY 与网络副作用）。
 
 ### 加一个新 provider
 
@@ -141,7 +143,7 @@ provider 私有字段 —— 加新 agent 应该只写一个 provider 包 + 注�
 |------|------|------|
 | 绑定 | `~/.agent-remote/bindings.json` | ✅ |
 | 配置 | `~/.agent-remote/.env` | ✅ |
-| 待决策 | `$XDG_RUNTIME_DIR/agent-remote/decisions/`（0700） | TTL |
+| 待决策 | 内存（TTL；重启断掉被 hold 的 hook，agent 退回本机权限框） | ❌ |
 | discover / 活跃度 | 内存 | ❌ |
 | **对话历史** | **只在 Telegram Topic 里**（D8） | TG 侧 |
 
@@ -152,5 +154,6 @@ provider 私有字段 —— 加新 agent 应该只写一个 provider 包 + 注�
 - `ALLOWED_USERS` 白名单，`ALLOWED_CHATS` 可选再收紧
 - `SESSION_ALLOWLIST` 限制能被遥控的 tmux session
 - ingress 只听 127.0.0.1 + HMAC-SHA256 验签
-- 决策 IPC 在 `$XDG_RUNTIME_DIR` 0700，不用世界可写的 `/tmp`
+- **发送前查在场**：不止 fingerprint（pane 没换人），还要确认前台确实是那个 agent ——
+  agent 退出后 shell 回到前台时拒发，否则那句话会被 shell 当命令执行
 - 往 pane 里写字等于拿到那台机器的手 —— Bot token 泄露即等价于 shell 泄露，token 文件 600

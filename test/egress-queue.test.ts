@@ -217,3 +217,51 @@ test('内容没变的编辑不算失败（刷新时列表未变化）', async ()
   const r = await q.enqueue({ chatId: '1', text: '一样的内容', editMessageId: 42 });
   assert.equal(r.messageId, 42, '目标状态已达到，不该抛异常');
 });
+
+// ── 话题被关闭（TOPIC_CLOSED）：消息降级主聊天流，绑定交上层解掉 ──
+
+test('TOPIC_CLOSED：回调解绑并降级主聊天流，消息不丢', async () => {
+  const sent: { threadId?: number; text: string }[] = [];
+  const transport: Transport = {
+    async sendMessage(job) {
+      if (job.threadId) {
+        throw new Error("Call to 'sendMessage' failed! (400: Bad Request: TOPIC_CLOSED)");
+      }
+      sent.push({ threadId: job.threadId, text: job.text });
+      return { messageId: 1 };
+    },
+    async editMessage(job) {
+      return { messageId: job.messageId };
+    },
+  };
+  let closed = 0;
+  const q = new EgressQueue(transport, { onTopicClosed: () => void closed++ });
+
+  await q.enqueue({ chatId: '1', threadId: 7, text: '收工前最后一条' });
+
+  assert.equal(closed, 1, '上层要拿到解绑信号');
+  assert.equal(sent.length, 1, '内容不能因为话题关了就丢');
+  assert.equal(sent[0]!.threadId, undefined, '降级到主聊天流');
+});
+
+test('编辑超长消息：截到首个切片而不是撞 MESSAGE_TOO_LONG', async () => {
+  const edited: string[] = [];
+  const transport: Transport = {
+    async sendMessage() {
+      return { messageId: 1 };
+    },
+    async editMessage(job) {
+      edited.push(job.text);
+      return { messageId: job.messageId };
+    },
+  };
+  const q = new EgressQueue(transport);
+
+  const long = Array.from({ length: 700 }, (_, i) => `line-${i} 的一些内容`).join('\n');
+  assert.ok(long.length > 3800, '前置条件：确实超长');
+  await q.enqueue({ chatId: '1', editMessageId: 5, text: long });
+
+  assert.equal(edited.length, 1);
+  assert.ok(edited[0]!.length <= 3800 + 2, `编辑体不能超限（实际 ${edited[0]!.length}）`);
+  assert.ok(edited[0]!.endsWith('…'), '截断要留痕');
+});

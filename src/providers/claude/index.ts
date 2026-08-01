@@ -32,8 +32,6 @@ export const claudeProvider: AgentProvider = {
     nativeTranscript: true,
     resumeSession: false,
     spawnFromBot: false,
-    // UserPromptSubmit hook 提供终端活跃信号
-    activitySuppress: true,
   },
 
   detect: detectClaude,

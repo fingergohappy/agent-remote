@@ -5,7 +5,7 @@
   "type": "module",
   "description": "手机遥控本机 tmux 里的 coding agent（Claude Code / Codex），以 pane_id 为绑定单位",
   "engines": {
-    "node": ">=22.6.0"
+    "node": ">=22.18.0"
   },
   "bin": {
     "agent-remote": "./src/main.ts"

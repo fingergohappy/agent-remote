@@ -6,8 +6,9 @@ import { homedir } from 'node:os';
 import { computeFingerprint } from './bind-store.ts';
 import { gitBranches } from '../infra/git.ts';
 import { listPanes, type TmuxPane } from '../infra/tmux.ts';
-import { snapshotProcesses, subtree } from '../infra/process-tree.ts';
-import { detectBest } from '../providers/registry.ts';
+import { snapshotProcesses, subtree, type ProcessSnapshot } from '../infra/process-tree.ts';
+import { DETECT_THRESHOLD, detectBest, getProvider } from '../providers/registry.ts';
+import type { DetectContext } from '../providers/types.ts';
 
 export type AgentInstance = {
   paneId: string;
@@ -44,24 +45,7 @@ export async function discover(opts: DiscoverOptions = {}): Promise<AgentInstanc
   const matched: { pane: TmuxPane; hit: NonNullable<ReturnType<typeof detectBest>> }[] = [];
 
   for (const pane of candidates) {
-    const tree = subtree(snap, pane.pid).map((n) => ({
-      pid: n.pid,
-      ppid: n.ppid,
-      comm: n.comm,
-      args: n.args,
-      stat: n.stat,
-      tty: n.tty,
-    }));
-
-    const hit = detectBest({
-      paneId: pane.paneId,
-      fgCommand: pane.fg,
-      panePid: pane.pid,
-      paneTty: pane.tty,
-      title: pane.title,
-      cwd: pane.cwd,
-      processTree: tree,
-    });
+    const hit = detectBest(detectCtxFor(pane, snap));
     if (!hit) continue;
 
     matched.push({ pane, hit });
@@ -131,4 +115,59 @@ export function sortForDisplay(instances: AgentInstance[]): AgentInstance[] {
 
 export function findPane(panes: TmuxPane[], paneId: string): TmuxPane | undefined {
   return panes.find((p) => p.paneId === paneId);
+}
+
+export type PresenceResult = 'ok' | 'pane_dead' | 'fingerprint_mismatch' | 'agent_gone';
+
+/** 批量校验（reconcile）时传入共享快照，避免每条绑定各 fork 一轮 tmux + ps */
+export type PresenceContext = {
+  panes?: TmuxPane[];
+  snap?: ProcessSnapshot;
+};
+
+function detectCtxFor(pane: TmuxPane, snap: ProcessSnapshot): DetectContext {
+  return {
+    paneId: pane.paneId,
+    fgCommand: pane.fg,
+    panePid: pane.pid,
+    paneTty: pane.tty,
+    title: pane.title,
+    cwd: pane.cwd,
+    processTree: subtree(snap, pane.pid).map((n) => ({
+      pid: n.pid,
+      ppid: n.ppid,
+      comm: n.comm,
+      args: n.args,
+      stat: n.stat,
+      tty: n.tty,
+    })),
+  };
+}
+
+/**
+ * 发送前必查：pane 还是绑定时那个 pane，**且 provider 的 agent 此刻仍是前台作业**。
+ *
+ * fingerprint 只证明「pane 没换人」—— 它的输入是 pane 根进程的 pid，通常是 shell。
+ * agent 退出后 shell 回到前台，fingerprint 照样匹配，此时把用户消息 send-keys
+ * 进去等于让 shell 直接执行它。所以 detect 的三道门槛（挂起 / 嵌套终端 /
+ * 前台进程组）必须在使用点重查一遍，而不是只在 discover 入口查。
+ */
+export async function verifyPresence(
+  b: { paneId: string; fingerprint: string; providerId: string },
+  ctx: PresenceContext = {},
+): Promise<PresenceResult> {
+  const panes = ctx.panes ?? (await listPanes());
+  const pane = findPane(panes, b.paneId);
+  if (!pane) return 'pane_dead';
+  if (computeFingerprint(b.paneId, pane.pid, b.providerId) !== b.fingerprint) {
+    return 'fingerprint_mismatch';
+  }
+
+  const provider = getProvider(b.providerId);
+  if (!provider) return 'agent_gone';
+
+  const snap = ctx.snap ?? (await snapshotProcesses());
+  const hit = provider.detect(detectCtxFor(pane, snap));
+  if (!hit || hit.confidence < DETECT_THRESHOLD) return 'agent_gone';
+  return 'ok';
 }

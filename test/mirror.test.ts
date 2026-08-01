@@ -5,16 +5,17 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readIncremental, type StreamCursor } from '../src/providers/transcript-io.ts';
 import { pollClaudeTranscript } from '../src/providers/claude/history.ts';
+import { pollCodexTranscript } from '../src/providers/codex/history.ts';
 import { TranscriptWatcher } from '../src/core/transcript-watcher.ts';
 import { BindStore, computeFingerprint, type Binding } from '../src/core/bind-store.ts';
 import { registerProvider, resetRegistry } from '../src/providers/registry.ts';
 import { claudeProvider } from '../src/providers/claude/index.ts';
-import { formatHistory, formatMirrored } from '../src/telegram/format.ts';
+import { escapeClipped, formatHistory, formatMirrored } from '../src/telegram/format.ts';
 import { EchoGuard } from '../src/core/echo-guard.ts';
 import type { AgentProvider, HistoryItem } from '../src/providers/types.ts';
 
@@ -33,7 +34,6 @@ function fakeMirrorProvider(
       nativeTranscript: true,
       resumeSession: false,
       spawnFromBot: false,
-      activitySuppress: false,
     },
     detect: () => null,
     normalizeIngress: () => null,
@@ -53,7 +53,7 @@ function fakeBinding(dir: string): { store: BindStore } {
     display: 'a:1.1',
     title: 't',
     ownedByUs: false,
-    notifyLevel: 'verbose',
+    notifyLevel: 'info',
     createdAt: now,
     updatedAt: now,
   });
@@ -158,7 +158,7 @@ test('Claude 增量：新写入的对话被解析出来', async () => {
   cleanup();
 });
 
-test('watcher：只镜像 verbose 的绑定，且能把消息交出去', async () => {
+test('watcher：只镜像 info 的绑定，且能把消息交出去', async () => {
   const { dir, cleanup } = tempDir();
   resetRegistry();
   registerProvider(claudeProvider);
@@ -178,7 +178,7 @@ test('watcher：只镜像 verbose 的绑定，且能把消息交出去', async (
     title: 't',
     ownedByUs: false,
     transcriptPath: file,
-    notifyLevel: 'verbose',
+    notifyLevel: 'info',
     createdAt: now,
     updatedAt: now,
   };
@@ -226,7 +226,7 @@ test('watcher：单轮吐出的条数有上限，防止刷爆话题', async () =
     title: 't',
     ownedByUs: false,
     transcriptPath: file,
-    notifyLevel: 'verbose',
+    notifyLevel: 'info',
     createdAt: now,
     updatedAt: now,
   });
@@ -337,7 +337,7 @@ test('fs.watch：transcript 有写入自动镜像，不等兜底轮询', async (
     title: 't',
     ownedByUs: false,
     transcriptPath: file,
-    notifyLevel: 'verbose',
+    notifyLevel: 'info',
     createdAt: now,
     updatedAt: now,
   });
@@ -367,7 +367,8 @@ test('fs.watch：transcript 有写入自动镜像，不等兜底轮询', async (
 test('镜像文案：agent 回复直出，终端输入标出来源，空内容丢弃', () => {
   assert.equal(formatMirrored({ role: 'assistant', text: '改完了' }), '改完了');
   assert.match(formatMirrored({ role: 'user', text: '继续' }) ?? '', /<blockquote>/);
-  assert.match(formatMirrored({ role: 'assistant', text: '[工具] Bash', kind: 'tool' }) ?? '', /🔧/);
+  // 工具行不投影（和 /history 一致）：只有名字没有参数，逐条推是纯噪声
+  assert.equal(formatMirrored({ role: 'assistant', text: '[工具] Bash', kind: 'tool' }), null);
   assert.equal(formatMirrored({ role: 'assistant', text: '   ' }), null);
 });
 
@@ -452,4 +453,141 @@ test('历史投影：超长单条会被切开，且每块都不超上限', () =>
 test('历史投影：HTML 被转义，引用块不会被内容打断', () => {
   const blocks = formatHistory([{ role: 'user', text: '</blockquote><script>' }]);
   assert.match(blocks[0]!, /&lt;\/blockquote&gt;&lt;script&gt;/);
+});
+
+// ── Claude 镜像的定位纪律：只信 hook 事实，不猜 ──
+
+test('Claude 镜像：只剩 cwd 时不追 —— 同 cwd 多实例会串线，等 hook 补事实', async () => {
+  const r = await pollClaudeTranscript({ paneId: '%1', cwd: '/tmp/does-not-matter' }, undefined);
+  assert.equal(r, null, '没有 sessionId/transcriptPath 时镜像必须按兵不动');
+});
+
+// ── Codex 镜像不能锁死在旧 rollout 上（/new、重启都会换文件且无任何事件）──
+
+function codexLine(kind: 'user_message' | 'agent_message', message: string): string {
+  return JSON.stringify({ type: 'event_msg', payload: { type: kind, message } }) + '\n';
+}
+
+function codexMeta(cwd: string, sessionId: string): string {
+  return JSON.stringify({ type: 'session_meta', payload: { cwd, session_id: sessionId } }) + '\n';
+}
+
+test('Codex 换会话（新 rollout 文件）后，空转几轮就自动跟过去', async () => {
+  const { dir, cleanup } = tempDir();
+  const day = join(dir, '.codex', 'sessions', '2026', '07', '31');
+  mkdirSync(day, { recursive: true });
+  const uuidA = '11111111-1111-1111-1111-111111111111';
+  const uuidB = '22222222-2222-2222-2222-222222222222';
+  const fileA = join(day, `rollout-2026-07-31T10-00-00-${uuidA}.jsonl`);
+  writeFileSync(fileA, codexMeta('/home/u/proj', uuidA));
+
+  const env = { HOME: dir } as NodeJS.ProcessEnv;
+  const ref = { paneId: '%1', cwd: '/home/u/proj' };
+
+  // 锁定 A 并读到它的增量
+  let r = await pollCodexTranscript(ref, undefined, env);
+  assert.equal(r?.source, fileA);
+  appendFileSync(fileA, codexLine('agent_message', '旧会话的回复'));
+  r = await pollCodexTranscript(ref, r!.nextCursor, env);
+  assert.deepEqual(r?.messages.map((m) => m.text), ['旧会话的回复']);
+
+  // /new：新 rollout 文件出现，旧文件从此不再增长
+  await sleep(20);
+  const fileB = join(day, `rollout-2026-07-31T11-00-00-${uuidB}.jsonl`);
+  writeFileSync(fileB, codexMeta('/home/u/proj', uuidB));
+
+  // 曾经的 bug：cursor 一锁到底，镜像永远盯着 fileA 失明
+  for (let i = 0; i < 5 && r?.source !== fileB; i++) {
+    r = await pollCodexTranscript(ref, r!.nextCursor, env);
+  }
+  assert.equal(r?.source, fileB, '连续空转后必须重扫并切到新 rollout');
+
+  // 切换语义是 fresh：不回放 B 的旧内容，但新写入要能读到
+  appendFileSync(fileB, codexLine('agent_message', '新会话第一句'));
+  r = await pollCodexTranscript(ref, r!.nextCursor, env);
+  assert.deepEqual(r?.messages.map((m) => m.text), ['新会话第一句']);
+  cleanup();
+});
+
+// ── HTML 预算要量在转义后的字符串上 ──
+
+test('escapeClipped：全是 < 的代码不会膨胀超预算，也不切断实体', () => {
+  const raw = '<'.repeat(4000); // 转义后 16000 字符
+  const out = escapeClipped(raw, 3500);
+  assert.ok(out.length <= 3500, `转义后 ${out.length} 必须在预算内`);
+  assert.ok(out.endsWith('…'));
+
+  // 去掉截断符后应能无损还原为原文前缀 —— 证明没有实体被拦腰切断
+  const decoded = out
+    .slice(0, -1)
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&');
+  assert.ok(raw.startsWith(decoded) && decoded.length > 0);
+
+  // 整条镜像消息（含标签）不超过 Telegram 单条上限
+  const msg = formatMirrored({ role: 'assistant', text: raw, kind: 'message' });
+  assert.ok(msg !== null && msg.length <= 4096);
+});
+
+test('escapeClipped：预算内的文本原样转义，不加截断符', () => {
+  assert.equal(escapeClipped('a<b', 100), 'a&lt;b');
+  assert.equal(escapeClipped('', 100), '');
+});
+
+test('游标落盘：重启间隙写入的内容不丢，也不重放已推过的', async () => {
+  const { dir, cleanup } = tempDir();
+  resetRegistry();
+  registerProvider(claudeProvider);
+
+  const file = join(dir, 'sess.jsonl');
+  writeFileSync(file, claudeLine('user', '旧历史'));
+  const cursorFile = join(dir, 'cursors.json');
+  const store = new BindStore(join(dir, 'bindings.json'));
+  const now = new Date().toISOString();
+  store.upsert({
+    chatId: '1',
+    threadId: 10,
+    paneId: '%1',
+    fingerprint: computeFingerprint('%1', 1, 'claude'),
+    providerId: 'claude',
+    display: 'a:1.1',
+    title: 't',
+    ownedByUs: false,
+    transcriptPath: file,
+    notifyLevel: 'info',
+    createdAt: now,
+    updatedAt: now,
+  });
+
+  const got1: string[] = [];
+  const w1 = new TranscriptWatcher({
+    store,
+    cursorFile,
+    onMessages: async (msgs) => {
+      for (const m of msgs) got1.push(m.item.text);
+    },
+  });
+  await w1.tick(); // 定位（旧历史不回放）
+  appendFileSync(file, claudeLine('assistant', '已推过的'));
+  await w1.tick();
+  assert.deepEqual(got1, ['已推过的']);
+  w1.stop();
+
+  // 「服务停着」的间隙里 agent 还在写
+  appendFileSync(file, claudeLine('assistant', '间隙里写的'));
+
+  const got2: string[] = [];
+  const w2 = new TranscriptWatcher({
+    store,
+    cursorFile,
+    onMessages: async (msgs) => {
+      for (const m of msgs) got2.push(m.item.text);
+    },
+  });
+  await w2.tick();
+  assert.deepEqual(got2, ['间隙里写的'], '重启后应从上次位置续读：不丢间隙、不重放旧的');
+
+  resetRegistry();
+  cleanup();
 });

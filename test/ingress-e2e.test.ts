@@ -9,7 +9,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { loadConfig, type Config } from '../src/config.ts';
-import { ActivityTracker } from '../src/core/activity.ts';
 import { AgentIndex } from '../src/core/agent-index.ts';
 import { BindStore, computeFingerprint, type Binding } from '../src/core/bind-store.ts';
 import { DecisionBroker } from '../src/core/decision-broker.ts';
@@ -65,12 +64,11 @@ async function harness(t: TestContext, overrides: Partial<Config> = {}): Promise
     },
   };
 
-  const broker = new DecisionBroker(join(dir, 'run'), 1500);
+  const broker = new DecisionBroker(1500);
   const app: AppContext = {
     config,
     store: new BindStore(join(dir, 'bindings.json')),
     index: new AgentIndex(),
-    activity: new ActivityTracker(config.terminalActiveWindowMs),
     echo: new EchoGuard(),
     broker,
     egress: new EgressQueue(transport),
@@ -204,6 +202,7 @@ test('hook 事件到达即踢镜像；无绑定不踢', async (t) => {
     kick() {
       kicked++;
     },
+    isMirroring: () => false,
   };
 
   // 没绑定的 pane：不该白跑一轮镜像
@@ -215,19 +214,44 @@ test('hook 事件到达即踢镜像；无绑定不踢', async (t) => {
   assert.ok(kicked >= 1, 'hook 到达应触发镜像增量读');
 });
 
-test('UserPromptSubmit 只打活跃度戳，不产生消息', async (t) => {
+test('completed / waiting 熄灭「正在输入…」，output 不熄', async (t) => {
+  const h = await harness(t);
+  const stops: string[] = [];
+  h.app.typing = {
+    start() {},
+    stop(chatId, threadId) {
+      stops.push(`${chatId}:${threadId ?? 0}`);
+    },
+  };
+  h.app.store.upsert(bind({ threadId: 11, paneId: '%14' }));
+
+  // 工具调用过程中 agent 还在跑，不该熄
+  await post(h.url, {
+    hook_event_name: 'PostToolUse',
+    tool_name: 'Bash',
+    paneId: '%14',
+    provider: 'claude',
+  });
+  assert.equal(stops.length, 0);
+
+  await post(h.url, { hook_event_name: 'Stop', paneId: '%14', provider: 'claude' });
+  assert.deepEqual(stops, ['-100999:11']);
+});
+
+test('UserPromptSubmit 不产生消息（silent，只更新索引/踢镜像）', async (t) => {
   const h = await harness(t);
   h.app.store.upsert(bind({ threadId: 11, paneId: '%14' }));
 
   await post(h.url, { hook_event_name: 'UserPromptSubmit', paneId: '%14', provider: 'claude' });
   await new Promise((r) => setTimeout(r, 30));
   assert.equal(h.sent.length, 0);
-  assert.equal(h.app.activity.isTerminalActive('%14'), true);
 });
 
-test('verbose 下不推「✅ 完成」—— 对话原文已经由镜像送达', async (t) => {
+test('info 且镜像在工作时不推「✅ 完成」—— 对话原文已经由镜像送达', async (t) => {
   const h = await harness(t);
-  h.app.store.upsert(bind({ threadId: 11, paneId: '%14', notifyLevel: 'verbose' }));
+  // 「镜像在工作」必须是 watcher 的事实信号，不是 provider 的 capability
+  h.app.mirror = { forget() {}, kick() {}, isMirroring: () => true };
+  h.app.store.upsert(bind({ threadId: 11, paneId: '%14', notifyLevel: 'info' }));
 
   await post(h.url, { hook_event_name: 'Stop', paneId: '%14', provider: 'claude' });
   await new Promise((r) => setTimeout(r, 60));
@@ -244,6 +268,18 @@ test('verbose 下不推「✅ 完成」—— 对话原文已经由镜像送达'
   assert.equal(h.sent.length, 1);
 });
 
+test('info 但镜像失明（定位不到 transcript）时，completed 必须照推', async (t) => {
+  const h = await harness(t);
+  // 曾经的 bug：按 capability 判「有镜像」，实际镜像锁死旧文件/找不到文件时
+  // completed 也被吞掉 —— info 反而什么都收不到
+  h.app.mirror = { forget() {}, kick() {}, isMirroring: () => false };
+  h.app.store.upsert(bind({ threadId: 11, paneId: '%14', notifyLevel: 'info' }));
+
+  await post(h.url, { hook_event_name: 'Stop', paneId: '%14', provider: 'claude' });
+  await new Promise((r) => setTimeout(r, 60));
+  assert.equal(h.sent.length, 1, '镜像没在工作，完成通知是唯一信号');
+});
+
 test('important 下没有镜像，completed 仍是唯一信号，要推', async (t) => {
   const h = await harness(t);
   h.app.store.upsert(bind({ threadId: 11, paneId: '%14', notifyLevel: 'important' }));
@@ -251,26 +287,6 @@ test('important 下没有镜像，completed 仍是唯一信号，要推', async 
   await post(h.url, { hook_event_name: 'Stop', paneId: '%14', provider: 'claude' });
   await new Promise((r) => setTimeout(r, 60));
   assert.equal(h.sent.length, 1, '这时候不推就什么都看不到了');
-});
-
-test('显式打开终端静音后，completed 被压制但等人事件仍推', async (t) => {
-  const h = await harness(t, { quietWhenTerminalActive: true });
-  h.app.store.upsert(bind({ threadId: 11, paneId: '%14', notifyLevel: 'important' }));
-
-  await post(h.url, { hook_event_name: 'UserPromptSubmit', paneId: '%14', provider: 'claude' });
-  await new Promise((r) => setTimeout(r, 30));
-  await post(h.url, { hook_event_name: 'Stop', paneId: '%14', provider: 'claude' });
-  await new Promise((r) => setTimeout(r, 30));
-  assert.equal(h.sent.length, 0, 'completed 应被终端活跃压制');
-
-  await post(h.url, {
-    hook_event_name: 'Notification',
-    message: 'Claude is waiting for your input',
-    paneId: '%14',
-    provider: 'claude',
-  });
-  await new Promise((r) => setTimeout(r, 30));
-  assert.equal(h.sent.length, 1, '等人的事件不该被吞');
 });
 
 test('未绑定的 pane 事件不投递到任何 Topic', async (t) => {
@@ -355,3 +371,4 @@ test('没人点按钮 → 超时，hook 拿到 provider 的兜底响应（退回
   assert.equal(body.timeout, true);
   assert.deepEqual(body.hookResponse, {}, '兜底响应必须是空对象，不能替用户 allow/deny');
 });
+

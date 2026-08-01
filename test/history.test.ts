@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { encodeCwd, parseClaudeLines } from '../src/providers/claude/history.ts';
 import { parseCodexLines } from '../src/providers/codex/history.ts';
 import { buildHistoryPage } from '../src/app/history-flow.ts';
-import { renderHistoryPage } from '../src/telegram/format.ts';
+import { layoutHistoryPages } from '../src/telegram/format.ts';
 import { computeFingerprint, type Binding } from '../src/core/bind-store.ts';
 import { registerProvider, resetRegistry } from '../src/providers/registry.ts';
 import { claudeProvider } from '../src/providers/claude/index.ts';
@@ -127,7 +127,7 @@ function pagingFixture(): { binding: Binding; cleanup: () => void } {
     title: 't',
     ownedByUs: false,
     transcriptPath: file,
-    notifyLevel: 'verbose',
+    notifyLevel: 'info',
     createdAt: now,
     updatedAt: now,
   };
@@ -178,13 +178,37 @@ test('分页：首页从最早开始，越界页码自动收敛', async () => {
   cleanup();
 });
 
-test('分页：单页超预算时截断显示并标注，不超 Telegram 上限', () => {
+test('布局：内容超页预算时自动开新页，每页都不超 Telegram 上限', () => {
   const items = Array.from({ length: 10 }, (_, i) => ({
     role: 'assistant' as const,
     text: `第${i}条 ` + 'x'.repeat(600),
   }));
-  const { text, shown } = renderHistoryPage(items);
-  assert.ok(text.length <= 4000, `单条消息超限: ${text.length}`);
-  assert.ok(shown < 10, '应有条目被省略');
-  assert.match(text, /放不下/);
+  const pages = layoutHistoryPages(items);
+  assert.ok(pages.length > 1, '10×600 字塞不进一页，应分页而不是截断');
+  for (const p of pages) assert.ok(p.body.length <= 3500, `页超限: ${p.body.length}`);
+  // 所有内容一个字不丢
+  const joined = pages.map((p) => p.body).join('');
+  for (let i = 0; i < 10; i++) assert.ok(joined.includes(`第${i}条`));
+});
+
+test('布局：超长消息独占页并切成续段，拼回完整原文', () => {
+  const long = 'y'.repeat(8000);
+  const pages = layoutHistoryPages([
+    { role: 'user', text: '短问题' },
+    { role: 'assistant', text: long },
+    { role: 'user', text: '追问' },
+  ]);
+
+  const segPages = pages.filter((p) => p.label.includes('段'));
+  assert.ok(segPages.length >= 3, `8000 字应切成 ≥3 段页，实际 ${segPages.length}`);
+  assert.match(segPages[0]!.label, /^第 2 条 · 1\/\d+ 段$/);
+  for (const p of segPages) assert.ok(p.body.length <= 3500);
+
+  // 段拼回去必须是完整原文 —— 「不截断」的硬承诺
+  const rebuilt = segPages.map((p) => p.body.replace(/^🤖 /, '')).join('');
+  assert.equal(rebuilt, long);
+
+  // 前后的短消息各归自己的页，不跟段页混
+  assert.equal(pages[0]!.label, '第 1 条');
+  assert.equal(pages[pages.length - 1]!.label, '第 3 条');
 });

@@ -3,6 +3,7 @@ import { Bot, type Api, type Context } from 'grammy';
 import type { Config } from '../config.ts';
 import type { TopicManager } from '../app/context.ts';
 import type { InlineButton, Transport } from '../core/egress-queue.ts';
+import type { TypingSender } from '../core/typing.ts';
 import { logger } from '../infra/logger.ts';
 import {
   closeTopic,
@@ -52,6 +53,17 @@ export function createTransport(api: Api): Transport {
       });
       return { messageId: typeof msg === 'object' ? msg.message_id : job.messageId };
     },
+  };
+}
+
+/** 「正在输入…」的底层调用；话题里要带 message_thread_id，否则只在主流显示 */
+export function createTypingSender(api: Api): TypingSender {
+  return async (chatId, threadId) => {
+    await api.sendChatAction(
+      chatId,
+      'typing',
+      threadId ? { message_thread_id: threadId } : undefined,
+    );
   };
 }
 

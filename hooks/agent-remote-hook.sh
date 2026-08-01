@@ -32,13 +32,13 @@ if [ -f "$ENV_FILE" ]; then
   # 只取需要的键，避免把整个 .env 灌进环境
   while IFS='=' read -r key value; do
     case "$key" in
-      INGRESS_HOST|INGRESS_PORT|INGRESS_SECRET)
+      INGRESS_HOST|INGRESS_PORT|INGRESS_SECRET|DECISION_TIMEOUT_SEC)
         value="${value%\"}"; value="${value#\"}"
         value="${value%\'}"; value="${value#\'}"
         export "$key=$value"
         ;;
     esac
-  done < <(grep -E '^(INGRESS_HOST|INGRESS_PORT|INGRESS_SECRET)=' "$ENV_FILE" 2>/dev/null)
+  done < <(grep -E '^(INGRESS_HOST|INGRESS_PORT|INGRESS_SECRET|DECISION_TIMEOUT_SEC)=' "$ENV_FILE" 2>/dev/null)
 fi
 
 HOST="${INGRESS_HOST:-127.0.0.1}"
@@ -87,9 +87,13 @@ SIG="sha256=$(printf '%s' "$PAYLOAD" | openssl dgst -sha256 -hmac "$SECRET" -r |
 URL="http://$HOST:$PORT/ingress"
 
 if [ "$BLOCKING" = "1" ]; then
+  # 等待时长跟着 .env 的 DECISION_TIMEOUT_SEC 走（+40s 余量），不写死 ——
+  # 否则改了服务端超时，这里就会提前掐断连接。
+  # 注意 Claude settings.json 里 PreToolUse 的 timeout 也要 ≥ 这个值。
+  MAX_TIME=$(( ${DECISION_TIMEOUT_SEC:-90} + 40 ))
   # 服务端 hold 住这次请求直到用户拍板或超时，响应里带 hookResponse
   RESPONSE="$(
-    curl -sS --max-time 130 -X POST "$URL" \
+    curl -sS --max-time "$MAX_TIME" -X POST "$URL" \
       -H 'Content-Type: application/json' \
       -H "X-Agent-Remote-Signature: $SIG" \
       -H "X-Agent-Remote-Provider: $PROVIDER" \

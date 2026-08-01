@@ -6,11 +6,10 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-export type NotifyLevel = 'off' | 'important' | 'verbose';
+export type NotifyLevel = 'off' | 'important' | 'info';
 
 export type Config = {
   home: string;
-  runtimeDir: string;
   bindingsFile: string;
 
   botToken: string;
@@ -27,11 +26,6 @@ export type Config = {
 
   ackOnSend: boolean;
   defaultNotifyLevel: NotifyLevel;
-  quietWhenTerminalActive: boolean;
-  /** 终端活跃判定窗口 */
-  terminalActiveWindowMs: number;
-  /** TG 发过指令后多久内的事件算作 fromTelegram */
-  telegramOriginWindowMs: number;
 
   decisionTimeoutMs: number;
   historyDefaultLimit: number;
@@ -95,23 +89,19 @@ function toBool(v: string | undefined, dflt: boolean): boolean {
   return /^(1|true|yes|on)$/i.test(v.trim());
 }
 
-function toInt(v: string | undefined, dflt: number): number {
+function toInt(v: string | undefined, dflt: number, min = 1): number {
   const n = Number(v);
-  return Number.isFinite(n) && n > 0 ? Math.floor(n) : dflt;
+  return Number.isFinite(n) && n >= min ? Math.floor(n) : dflt;
 }
 
-function toNotifyLevel(v: string | undefined, dflt: NotifyLevel): NotifyLevel {
-  return v === 'off' || v === 'important' || v === 'verbose' ? v : dflt;
+/** 全量级旧名 `verbose` 已更名 `info`；老绑定、旧按钮、环境变量里的旧拼写统一在这归一。 */
+export function toNotifyLevel(v: string | undefined, dflt: NotifyLevel): NotifyLevel {
+  if (v === 'verbose') return 'info';
+  return v === 'off' || v === 'important' || v === 'info' ? v : dflt;
 }
 
 export function defaultHome(env: NodeJS.ProcessEnv = process.env): string {
   return env.AGENT_REMOTE_HOME || join(env.HOME || homedir(), '.agent-remote');
-}
-
-export function defaultRuntimeDir(env: NodeJS.ProcessEnv = process.env): string {
-  const base = env.XDG_RUNTIME_DIR;
-  if (base) return join(base, 'agent-remote');
-  return join(defaultHome(env), 'run');
 }
 
 /** 读取配置。`strict=false` 时不校验必填项（供 CLI 子命令使用）。 */
@@ -125,7 +115,6 @@ export function loadConfig(
 
   const cfg: Config = {
     home,
-    runtimeDir: get('AGENT_REMOTE_RUNTIME_DIR') || defaultRuntimeDir(env),
     bindingsFile: join(home, 'bindings.json'),
 
     botToken: get('TELEGRAM_BOT_TOKEN') || '',
@@ -136,23 +125,21 @@ export function loadConfig(
     ingressPort: toInt(get('INGRESS_PORT'), 8787),
     ingressSecret: get('INGRESS_SECRET') || '',
 
-    sessionAllowlist: toList(get('SESSION_ALLOWLIST') ?? 'agent,ibnk,soc,ops,hermes'),
+    // 不设默认名单：默认扫全部 session（与 .env.example「留空 = 全部」一致）
+    sessionAllowlist: toList(get('SESSION_ALLOWLIST')),
 
     ackOnSend: toBool(get('ACK_ON_SEND'), false),
-    defaultNotifyLevel: toNotifyLevel(get('DEFAULT_NOTIFY_LEVEL'), 'verbose'),
-    quietWhenTerminalActive: toBool(get('QUIET_WHEN_TERMINAL_ACTIVE'), false),
-    terminalActiveWindowMs: toInt(get('TERMINAL_ACTIVE_WINDOW_SEC'), 300) * 1000,
-    telegramOriginWindowMs: toInt(get('TELEGRAM_ORIGIN_WINDOW_SEC'), 900) * 1000,
+    defaultNotifyLevel: toNotifyLevel(get('DEFAULT_NOTIFY_LEVEL'), 'info'),
 
     decisionTimeoutMs: toInt(get('DECISION_TIMEOUT_SEC'), 90) * 1000,
     historyDefaultLimit: toInt(get('HISTORY_DEFAULT_LIMIT'), 30),
     syncHistoryOnBind: toBool(get('SYNC_HISTORY_ON_BIND'), false),
 
     closeTopicOnUnbind: toBool(get('CLOSE_TOPIC_ON_UNBIND'), true),
-    // 镜像的兜底轮询间隔。主路径是 hook 触发 + fs.watch，这里只是保险丝
-    mirrorIntervalMs: toInt(get('MIRROR_INTERVAL_MS'), 20_000),
+    // 镜像的兜底轮询间隔。主路径是 hook 触发 + fs.watch，这里只是保险丝；0 = 关闭兜底
+    mirrorIntervalMs: toInt(get('MIRROR_INTERVAL_MS'), 20_000, 0),
 
-    sendEnterDelayMs: toInt(get('SEND_ENTER_DELAY_MS'), 150),
+    sendEnterDelayMs: toInt(get('SEND_ENTER_DELAY_MS'), 150, 0),
     sendBracketedPaste: toBool(get('SEND_BRACKETED_PASTE'), true),
 
     logLevel: (['debug', 'info', 'warn', 'error'] as const).includes(

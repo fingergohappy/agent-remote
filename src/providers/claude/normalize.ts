@@ -62,7 +62,7 @@ export function normalizeClaude(raw: unknown): NormalizedEvent | null {
       return { ...base, type: 'started', summary: '会话开始' };
 
     case 'UserPromptSubmit':
-      // 只用于「终端前活跃」打点（D13），不产生消息。
+      // 不产生消息，只用于会话索引更新与镜像 kick。
       return { ...base, type: 'output', silent: true, summary: '用户在终端输入' };
 
     case 'Notification': {

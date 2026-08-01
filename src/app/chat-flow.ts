@@ -23,7 +23,7 @@ export async function handleUserText(
     };
   }
 
-  const result = await sendToBinding(ctx.store, binding, args.text, {
+  const result = await sendToBinding(binding, args.text, {
     enterDelayMs: ctx.config.sendEnterDelayMs,
     bracketedPaste: ctx.config.sendBracketedPaste,
   });
@@ -39,11 +39,24 @@ export async function handleUserText(
         message: `❌ ${result.error}\n已自动解绑。`,
       };
     }
+    // agent 退了但 pane 还在：不解绑（多半是 Ctrl-C 后马上会重启），
+    // 但消息绝不能发 —— 现在前台是 shell，发过去就是让 shell 执行它
+    if (result.code === 'agent_gone') {
+      log.info('前台已不是 agent，拒发', { paneId: binding.paneId });
+      return {
+        ok: false,
+        reason: 'send_failed',
+        message: `⚠️ ${result.error}\n消息未发送，agent 回来后再发即可（或 /unbind）。`,
+      };
+    }
     return { ok: false, reason: 'send_failed', message: `❌ 发送失败：${result.error}` };
   }
 
   // agent 会把这句话记进自己的 transcript，别让镜像再推回来
   ctx.echo.note(result.paneId, args.text);
+
+  // 活交出去了，agent 开始跑 —— 话题里转「正在输入…」直到它停下来
+  ctx.typing?.start(args.chatId, args.threadId || undefined);
 
   return { ok: true, paneId: result.paneId, acked: ctx.config.ackOnSend };
 }

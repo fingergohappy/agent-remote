@@ -17,7 +17,6 @@ export const codexProvider: AgentProvider = {
     resumeSession: false,
     spawnFromBot: false,
     // 没有等价于 UserPromptSubmit 的实时活跃信号
-    activitySuppress: false,
   },
 
   detect: detectCodex,

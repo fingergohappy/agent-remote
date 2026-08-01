@@ -76,6 +76,22 @@ test('claude 跑在 node 包装器下也能认出来', () => {
   assert.equal(hit?.providerId, 'claude');
 });
 
+test('pager 打开叫 claude 的文件不被认领 —— args 命中只对解释器包装有效', () => {
+  // less 的 args 是 `less /notes/claude`，尾部 /claude 会命中 args 正则；
+  // 但 comm 不是 node/bun 这类解释器，认领它等于把手机消息打进 pager
+  const tree = [
+    shell,
+    { pid: 200, ppid: 100, comm: 'less', args: 'less /notes/claude', stat: 'S+', tty: 'pts/5' },
+  ];
+  assert.equal(detectClaude(ctx({ fgCommand: 'less', processTree: tree })), null);
+
+  const tail = [
+    shell,
+    { pid: 200, ppid: 100, comm: 'tail', args: 'tail -f codex', stat: 'S+', tty: 'pts/5' },
+  ];
+  assert.equal(detectCodex(ctx({ fgCommand: 'tail', processTree: tail })), null);
+});
+
 test('args 里恰好出现名字不算：编辑 claude.md 的 nvim 不被认领', () => {
   const tree = [shell, { pid: 200, ppid: 100, comm: 'nvim', args: 'nvim claude.md', stat: 'S+', tty: 'pts/5' }];
   assert.equal(detectClaude(ctx({ fgCommand: 'nvim', processTree: tree })), null);

@@ -57,6 +57,7 @@ function findBySessionId(root: string, sessionId: string): string | null {
 export function resolveTranscript(
   ref: HistoryRef,
   env: NodeJS.ProcessEnv = process.env,
+  opts: { strict?: boolean } = {},
 ): string | null {
   if (ref.transcriptPath && existsSync(ref.transcriptPath)) return ref.transcriptPath;
 
@@ -67,8 +68,11 @@ export function resolveTranscript(
       const exact = join(dir, `${ref.sessionId}.jsonl`);
       if (existsSync(exact)) return exact;
     }
-    const newest = newestJsonl(dir);
-    if (newest) return newest;
+    // strict（镜像用）不猜「目录里最新的」—— 同 cwd 多实例会拿到别人的会话
+    if (!opts.strict) {
+      const newest = newestJsonl(dir);
+      if (newest) return newest;
+    }
   }
   if (ref.sessionId) return findBySessionId(root, ref.sessionId);
   return null;
@@ -138,7 +142,13 @@ export async function pollClaudeTranscript(
   cursor: unknown,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<{ nextCursor: unknown; messages: HistoryItem[]; source?: string } | null> {
-  const file = resolveTranscript(ref, env);
+  // 镜像只信 hook 送来的事实（sessionId / transcriptPath）。只剩 cwd 时
+  // 「目录里最新的 jsonl」可能属于同 cwd 的另一个实例 —— /history 可以容忍
+  // （用户主动拉、带 source 标注），持续镜像不行：串线会把别人的对话灌进这个话题。
+  // 绑定后第一个 hook 事件（SessionStart / UserPromptSubmit / Stop 任一）就会补上事实。
+  if (!ref.sessionId && !ref.transcriptPath) return null;
+
+  const file = resolveTranscript(ref, env, { strict: true });
   if (!file) return null;
 
   const read = await readIncremental(file, cursor as StreamCursor | undefined);

@@ -134,27 +134,60 @@ export function parseCodexLines(lines: string[]): HistoryItem[] {
   return items;
 }
 
+type CodexCursor = StreamCursor & {
+  /** 连续多少轮没读到新内容 —— 攒够了就重扫，防止锁死在旧会话的文件上 */
+  idle?: number;
+};
+
+/** 连续空转这么多轮后重扫 sessions 目录，看看是不是换了 rollout 文件 */
+const IDLE_TICKS_BEFORE_RESCAN = 3;
+
 /**
  * 增量镜像。codex 的 notify 只在一轮结束时响一次，中间的往来要看 rollout。
  * 解析 rollout 的代价比 Claude 高（噪声行多），所以缓存已解析出的文件路径。
+ *
+ * 但不能一锁到底：codex 里 /new 或重启都会换 rollout 文件，而 notify 事件里
+ * 没有任何「换会话了」的信号 —— 一直盯旧文件就是永久失明。折中是连续几轮
+ * 空转后重扫一次，发现更新的 rollout 就切过去（fresh 语义：从新文件末尾跟起）。
  */
 export async function pollCodexTranscript(
   ref: HistoryRef,
   cursor: unknown,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<{ nextCursor: unknown; messages: HistoryItem[]; source?: string } | null> {
-  const known = cursor as StreamCursor | undefined;
-  // 已经锁定过文件就别再全盘扫 sessions 目录
-  const file = known?.file ?? (await resolveRollout(ref, env));
+  const known = cursor as CodexCursor | undefined;
+  const locked = known?.file;
+  const file = locked ?? (await resolveRollout(ref, env));
   if (!file) return null;
 
-  const read = await readIncremental(file, known);
+  const read = await readIncremental(file, locked ? { file: locked, offset: known!.offset } : undefined);
   if (!read) return null;
-  if (read.fresh || !read.lines.length) {
-    return { nextCursor: read.cursor, messages: [], source: file };
+
+  if (!read.fresh && read.lines.length) {
+    return {
+      nextCursor: { ...read.cursor, idle: 0 },
+      messages: parseCodexLines(read.lines),
+      source: file,
+    };
   }
 
-  return { nextCursor: read.cursor, messages: parseCodexLines(read.lines), source: file };
+  const idle = (known?.idle ?? 0) + 1;
+  if (locked && idle >= IDLE_TICKS_BEFORE_RESCAN) {
+    const latest = await resolveRollout(ref, env);
+    if (latest && latest !== locked) {
+      const relocated = await readIncremental(latest, undefined);
+      return {
+        nextCursor: relocated
+          ? { ...relocated.cursor, idle: 0 }
+          : { file: latest, offset: 0, idle: 0 },
+        messages: [],
+        source: latest,
+      };
+    }
+    return { nextCursor: { ...read.cursor, idle: 0 }, messages: [], source: file };
+  }
+
+  return { nextCursor: { ...read.cursor, idle }, messages: [], source: file };
 }
 
 export async function fetchCodexHistory(

@@ -47,7 +47,7 @@ curl -s http://127.0.0.1:8787/health
 | `SessionStart` | 建立 `paneId ↔ sessionId` 映射，`/history` 才能精确定位会话 |
 | `Notification` | 等待输入 / 需要授权 → 推手机 |
 | `Stop` | 完成通知 |
-| `UserPromptSubmit` | **不推送**，只用来记「人正坐在终端前」，据此静音（D13） |
+| `UserPromptSubmit` | **不推送**，只用于会话索引与镜像触发 |
 | `SessionEnd` | 会话结束 |
 
 已经有别的 `Notification` hook（比如桌面通知）？两条并列写进同一个 `hooks` 数组即可，互不影响。
@@ -73,6 +73,9 @@ curl -s http://127.0.0.1:8787/health
 
 行为：hook 会一直等到你在 Telegram 上点按钮，或 `DECISION_TIMEOUT_SEC`（默认 90 秒）超时。
 **超时不会替你决定** —— hook 输出空，Claude 退回本机 TUI 的权限框照常问你。
+
+hook 内部的 curl 等待自动取 `DECISION_TIMEOUT_SEC + 40s`；但上面 settings.json 里的
+`"timeout": 130` 是 Claude 侧的死数字 —— 改大 `DECISION_TIMEOUT_SEC` 时要同步它 ≥ 新值 + 40。
 
 `matcher` 建议只挂高风险工具。挂 `.*` 会让每次工具调用都等你在手机上点一下。
 
@@ -111,5 +114,5 @@ LOG_LEVEL=debug node src/main.ts
 ```
 
 回复正文来自 transcript 镜像，不是 hook —— Claude 的 Stop hook 不带正文。
-所以第 3 步没反应有两种可能：推送级别不是 `verbose`（`/notify` 看一眼），
+所以第 3 步没反应有两种可能：推送级别不是 `info`（`/notify` 看一眼），
 或者 hook 压根没送到（日志里搜 `ingress`）。等待授权、失败这类事件才走 hook。

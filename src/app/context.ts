@@ -5,7 +5,6 @@
  * 由 telegram/ 提供实现、main.ts 组装。
  */
 import type { Config } from '../config.ts';
-import type { ActivityTracker } from '../core/activity.ts';
 import type { AgentIndex } from '../core/agent-index.ts';
 import type { BindStore } from '../core/bind-store.ts';
 import type { DecisionBroker } from '../core/decision-broker.ts';
@@ -38,19 +37,33 @@ export type TopicManager = {
   verifyTopic(chatId: string, threadId: number, title: string): Promise<boolean>;
 };
 
-/** 镜像的窄接口，避免 app 依赖 watcher 的完整实现：忘游标 + 事件驱动踢一轮 */
-export type MirrorControl = { forget(paneId: string): void; kick(): void };
+/**
+ * 镜像的窄接口，避免 app 依赖 watcher 的完整实现：
+ * 忘游标 + 事件驱动踢一轮 + 「此刻真的在镜像吗」的事实信号。
+ */
+export type MirrorControl = {
+  forget(paneId: string): void;
+  kick(): void;
+  isMirroring(paneId: string): boolean;
+};
+
+/** 「正在输入…」指示器的窄接口；agent 干活时转，停下来时停 */
+export type TypingControl = {
+  start(chatId: string, threadId?: number): void;
+  stop(chatId: string, threadId?: number): void;
+};
 
 export type AppContext = {
   config: Config;
   store: BindStore;
   index: AgentIndex;
-  activity: ActivityTracker;
   /** 挡住「自己发出去的话被镜像推回来」 */
   echo: EchoGuard;
   broker: DecisionBroker;
   /** transcript 镜像；未启用时为 undefined */
   mirror?: MirrorControl;
+  /** 「正在输入…」指示器；未启用时为 undefined */
+  typing?: TypingControl;
   egress: EgressQueue;
   topics: TopicManager;
 };
@@ -77,7 +90,7 @@ export type ParsedCallback =
   | { kind: 'history-page'; page: number; size: number }
   | { kind: 'unbind'; threadId: number }
   | { kind: 'topic-delete'; threadId: number }
-  | { kind: 'notify-level'; level: 'off' | 'important' | 'verbose' }
+  | { kind: 'notify-level'; level: 'off' | 'important' | 'info' }
   | { kind: 'refresh' }
   | null;
 
@@ -85,8 +98,10 @@ export function parseCallback(data: string): ParsedCallback {
   if (data === 'ag:refresh') return { kind: 'refresh' };
   if (data.startsWith('b:')) return { kind: 'bind', paneId: data.slice(2) };
   if (data.startsWith('nl:')) {
-    const level = data.slice(3);
-    return level === 'off' || level === 'important' || level === 'verbose'
+    // 旧消息按钮上可能还挂着更名前的 nl:verbose —— 认作 info
+    const raw = data.slice(3);
+    const level = raw === 'verbose' ? 'info' : raw;
+    return level === 'off' || level === 'important' || level === 'info'
       ? { kind: 'notify-level', level }
       : null;
   }

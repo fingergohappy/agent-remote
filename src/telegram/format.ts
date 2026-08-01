@@ -11,8 +11,24 @@ export function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-function clip(s: string, max: number): string {
-  return s.length > max ? s.slice(0, max - 1) + '…' : s;
+/**
+ * 转义并按**转义后**长度截断。
+ * 「先 clip 原文再 escape」会让预算失真：`<` 变 `&lt;`（4 倍）、`&` 变 `&amp;`（5 倍），
+ * 贴代码的消息轻松膨胀过 Telegram 的 4096 上限，被 splitText 从实体中间切断
+ * → parse error → 整段降级纯文本还带乱码。预算必须量在转义后的字符串上。
+ */
+export function escapeClipped(raw: string, maxEscaped: number): string {
+  let esc = escapeHtml(raw);
+  if (esc.length <= maxEscaped) return esc;
+
+  // 按膨胀比例收紧原文；一个原字符至少占一个转义字符，第二步砍掉超出量必达标
+  let keep = Math.floor((raw.length * (maxEscaped - 1)) / esc.length);
+  esc = escapeHtml(raw.slice(0, keep));
+  if (esc.length > maxEscaped - 1) {
+    keep -= esc.length - (maxEscaped - 1);
+    esc = escapeHtml(raw.slice(0, Math.max(0, keep)));
+  }
+  return esc + '…';
 }
 
 const ICONS: Record<AgentEventType, string> = {
@@ -151,7 +167,7 @@ export function formatBindingStatus(b: Binding, alive: boolean, display: string 
  * 逐条发会刷屏（30 条历史 = 30 条通知），所以合并成几大块。
  */
 function renderHistoryItem(item: HistoryItem, maxPerItem: number): string {
-  const text = escapeHtml(clip(item.text.trim(), maxPerItem));
+  const text = escapeClipped(item.text.trim(), maxPerItem);
   if (!text) return '';
   if (item.role === 'user') return `<blockquote>🧑 ${text}</blockquote>`;
   if (item.role === 'assistant') {
@@ -197,14 +213,15 @@ export function formatMirrored(item: HistoryItem): string | null {
 
   // 和 /history 一致：你说的话进引用块，和 agent 的话视觉上分开
   if (item.role === 'user') {
-    return `<blockquote>🧑 ${escapeHtml(clip(text, MIRROR_MAX))}</blockquote>`;
+    return `<blockquote>🧑 ${escapeClipped(text, MIRROR_MAX)}</blockquote>`;
   }
   if (item.role === 'assistant') {
-    return item.kind === 'tool'
-      ? `🔧 <i>${escapeHtml(clip(text, 200))}</i>`
-      : escapeHtml(clip(text, MIRROR_MAX));
+    // 纯工具行不投影（和 /history 一致，design §4.3）：只有工具名没有参数，
+    // 逐条推只会把正文冲散；「agent 在干活」的观感由 typing 指示器承担
+    if (item.kind === 'tool') return null;
+    return escapeClipped(text, MIRROR_MAX);
   }
-  return `⚙️ ${escapeHtml(clip(text, 1000))}`;
+  return `⚙️ ${escapeClipped(text, 1000)}`;
 }
 
 export function historyHeader(count: number, source?: string): string {
@@ -214,35 +231,100 @@ export function historyHeader(count: number, source?: string): string {
 
 /** 分页视图必须挤进一条可编辑消息，预算比 4096 留足 HTML 余量 */
 const HISTORY_PAGE_BUDGET = 3500;
+/** 角色包裹标签的最大开销（blockquote 一套） */
+const WRAP_OVERHEAD = 40;
+/** 单条消息最多切成这么多段页 —— 防一条怪物消息把页数撑到上百 */
+const MAX_PARTS = 20;
+
+export type HistoryPageLayout = {
+  body: string;
+  /** 页头标注：「第 3–12 条」或「第 51 条 · 2/3 段」 */
+  label: string;
+};
+
+/** 已转义正文（无标签）套上角色样式；分段续页每段单独套，保证 HTML 完整 */
+function wrapEscaped(item: HistoryItem, esc: string): string {
+  if (item.role === 'user') return `<blockquote>🧑 ${esc}</blockquote>`;
+  if (item.role === 'assistant') {
+    return item.kind === 'tool' ? `<i>🔧 ${esc}</i>` : `🤖 ${esc}`;
+  }
+  return `<i>⚙️ ${esc}</i>`;
+}
+
+/** 切已转义文本：优先在换行/空格断；硬切时避开 `&…;` 实体中间。 */
+function splitEscapedText(esc: string, max: number): string[] {
+  const parts: string[] = [];
+  let rest = esc;
+  while (rest.length > max && parts.length < MAX_PARTS - 1) {
+    let cut = rest.lastIndexOf('\n', max);
+    if (cut < max * 0.5) cut = rest.lastIndexOf(' ', max);
+    if (cut < max * 0.5) {
+      cut = max;
+      // 实体最长 6 字符（&quot;）——切点前 6 字符内有未闭合的 & 就退到它前面
+      const amp = rest.lastIndexOf('&', cut - 1);
+      if (amp > cut - 7 && amp > 0 && rest.indexOf(';', amp) >= cut) cut = amp;
+    }
+    parts.push(rest.slice(0, cut));
+    rest = rest.slice(cut).replace(/^\n/, '');
+  }
+  // 触发 MAX_PARTS 护栏时兜底截断 —— 正常路径 rest 一定 ≤ max
+  if (rest) parts.push(rest.length > max ? rest.slice(0, max - 1) + '…' : rest);
+  return parts;
+}
 
 /**
- * 把一页历史渲染成**单条**消息文本（分页靠 editMessage 原地翻，不能分块多发）。
- * 预算内放不下的条目省略并标注 —— 分页索引不受影响，只是显示截断。
+ * 把整份历史排成页序列（内容驱动，不截断）：
+ * - 普通消息按条数（≤size）与页预算攒页；
+ * - 超过单页预算的消息独占页；一页放不下就切成多个「续段」页，翻页看完整原文。
+ * 布局是确定性的：同样输入永远同样的页边界，无状态翻页每次重算也稳定；
+ * 历史只追加，所以已有页的边界不会因新消息而漂移。
  */
-export function renderHistoryPage(
+export function layoutHistoryPages(
   items: HistoryItem[],
-  opts: { maxPerItem?: number; budget?: number } = {},
-): { text: string; shown: number } {
-  const maxPerItem = opts.maxPerItem ?? 500;
+  opts: { size?: number; budget?: number } = {},
+): HistoryPageLayout[] {
+  const size = opts.size ?? 10;
   const budget = opts.budget ?? HISTORY_PAGE_BUDGET;
 
+  const pages: HistoryPageLayout[] = [];
   let buf = '';
-  let shown = 0;
-  for (const item of items) {
-    const piece = renderHistoryItem(item, maxPerItem);
-    if (!piece) {
-      shown++; // 空条目视为已展示，否则截断标注会虚报
-      continue;
-    }
-    const next = buf ? `${buf}\n\n${piece}` : piece;
-    if (next.length > budget && buf) break;
-    buf = next;
-    shown++;
-  }
+  let startNo = 0; // 当前页起止条号（1 起算）
+  let lastNo = 0;
+  let count = 0;
 
-  const dropped = items.length - shown;
-  if (dropped > 0) {
-    buf += `\n\n<i>（本页还有 ${dropped} 条太长放不下，可用更小的每页条数，如 /history 5）</i>`;
-  }
-  return { text: buf, shown };
+  const flush = (): void => {
+    if (!buf) return;
+    const label = startNo === lastNo ? `第 ${startNo} 条` : `第 ${startNo}–${lastNo} 条`;
+    pages.push({ body: buf, label });
+    buf = '';
+    count = 0;
+  };
+
+  items.forEach((item, idx) => {
+    const no = idx + 1;
+    const esc = escapeHtml(item.text.trim());
+    if (!esc) return;
+
+    const wrapped = wrapEscaped(item, esc);
+    if (wrapped.length <= budget) {
+      if (buf && (`${buf}\n\n${wrapped}`.length > budget || count >= size)) flush();
+      if (count === 0) startNo = no;
+      buf = buf ? `${buf}\n\n${wrapped}` : wrapped;
+      lastNo = no;
+      count++;
+      return;
+    }
+
+    // 超长消息：独占页并切段，每段一页
+    flush();
+    const segs = splitEscapedText(esc, budget - WRAP_OVERHEAD);
+    segs.forEach((seg, si) => {
+      pages.push({
+        body: wrapEscaped(item, seg),
+        label: `第 ${no} 条 · ${si + 1}/${segs.length} 段`,
+      });
+    });
+  });
+  flush();
+  return pages;
 }

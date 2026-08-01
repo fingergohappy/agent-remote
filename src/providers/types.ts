@@ -20,8 +20,6 @@ export type ProviderCapabilities = {
   resumeSession: boolean;
   /** 从 TG 拉起新进程 */
   spawnFromBot: boolean;
-  /** 支持「终端前活跃则静音」所需的活动信号 */
-  activitySuppress: boolean;
 };
 
 /** Core 只消费这些事件类型；provider 负责把原生 hook 映射过来。 */
@@ -108,8 +106,6 @@ export type DecisionUiSpec = {
 
 export type DecisionOutcome = {
   ok: boolean;
-  /** 结构化通路不可用时，core 可回退到具名按键 */
-  fallbackKeys?: string[];
   /** 展示给用户的结果说明 */
   note?: string;
 };

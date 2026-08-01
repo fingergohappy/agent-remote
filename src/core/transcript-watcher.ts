@@ -10,10 +10,13 @@
  *  2. fs.watch —— 监听 provider 报上来的 transcript 文件（source），写入即踢；
  *  3. 兜底轮询 —— 低频定时 tick，防 hook 丢失 / inotify 在某些文件系统上失灵。
  *
- * 重启后从文件当前末尾开始跟，不回放历史 —— 要看之前的用 /history。
+ * 游标持久化（cursorFile）：重启后从上次读到的精确位置续读，重启间隙写入的
+ * 内容照常推出 —— 丢游标才退化成「从当前末尾开始跟」（首次见到该文件时的行为，
+ * 防止长期停机后把陈年历史刷进话题；文件被截断/换新会话同样重新定位）。
  */
 import { watch, type FSWatcher } from 'node:fs';
 import type { BindStore, Binding } from './bind-store.ts';
+import { readJson, writeJsonAtomic } from '../infra/state-fs.ts';
 import { logger } from '../infra/logger.ts';
 import { getProvider } from '../providers/registry.ts';
 import type { HistoryItem } from '../providers/types.ts';
@@ -32,7 +35,11 @@ export type WatcherDeps = {
   maxPerTick?: number;
   /** kick 的防抖窗口：hook 风暴 / 连续写盘时合并成一轮 */
   kickDebounceMs?: number;
+  /** 游标落盘位置；不传则游标只活在内存（重启丢增量，仅测试可接受） */
+  cursorFile?: string;
 };
+
+type PersistedCursors = { version: 1; cursors: Record<string, unknown> };
 
 const DEFAULT_INTERVAL_MS = 20_000;
 const DEFAULT_MAX_PER_TICK = 15;
@@ -42,6 +49,8 @@ export class TranscriptWatcher {
   #deps: WatcherDeps;
   #cursors = new Map<string, unknown>(); // paneId → provider 私有游标
   #fileWatches = new Map<string, { path: string; watcher: FSWatcher }>(); // paneId → fs.watch
+  /** 上一轮成功定位到 transcript 的 pane —— 镜像「真的在工作」的事实信号 */
+  #located = new Set<string>();
   #timer?: NodeJS.Timeout;
   #kickTimer?: NodeJS.Timeout;
   #running = false;
@@ -50,11 +59,31 @@ export class TranscriptWatcher {
 
   constructor(deps: WatcherDeps) {
     this.#deps = deps;
+    if (deps.cursorFile) {
+      const data = readJson<PersistedCursors>(deps.cursorFile, { version: 1, cursors: {} });
+      for (const [paneId, cursor] of Object.entries(data.cursors ?? {})) {
+        this.#cursors.set(paneId, cursor);
+      }
+    }
   }
 
+  /** 游标是 provider 私有值，这里只存取、不解析（边界同 payload） */
+  #persistCursors(): void {
+    if (!this.#deps.cursorFile) return;
+    try {
+      writeJsonAtomic(this.#deps.cursorFile, {
+        version: 1,
+        cursors: Object.fromEntries(this.#cursors),
+      });
+    } catch (err) {
+      log.warn('游标落盘失败（重启会丢一段镜像）', { err: String(err) });
+    }
+  }
+
+  /** intervalMs <= 0 时不设兜底轮询，只靠 kick + fs.watch */
   start(intervalMs = DEFAULT_INTERVAL_MS): void {
-    if (this.#timer) return;
     this.#stopped = false;
+    if (this.#timer || intervalMs <= 0) return;
     this.#timer = setInterval(() => void this.tick(), intervalMs);
     this.#timer.unref?.();
   }
@@ -69,8 +98,18 @@ export class TranscriptWatcher {
   }
 
   forget(paneId: string): void {
-    this.#cursors.delete(paneId);
+    if (this.#cursors.delete(paneId)) this.#persistCursors();
+    this.#located.delete(paneId);
     this.#closeWatch(paneId);
+  }
+
+  /**
+   * 这个 pane 的镜像此刻真的在工作吗（上一轮成功定位到 transcript）。
+   * notify-policy 据此决定 completed 之类的事件要不要让位给镜像 ——
+   * 用 capability（理论上能）做这个判断会在镜像失明时把通知也吞掉。
+   */
+  isMirroring(paneId: string): boolean {
+    return this.#located.has(paneId);
   }
 
   /** 事件驱动入口：hook 到达 / transcript 文件有写入时调，防抖后跑一轮 tick。 */
@@ -91,12 +130,16 @@ export class TranscriptWatcher {
       return;
     }
     this.#running = true;
+    let cursorsDirty = false;
     try {
       const collected: MirroredMessage[] = [];
       const activePanes = new Set<string>();
 
       for (const binding of this.#deps.store.list()) {
-        if (binding.notifyLevel !== 'verbose') continue; // 只有全量模式才镜像
+        if (binding.notifyLevel !== 'info') {
+          this.#located.delete(binding.paneId); // 降级后不再镜像，健康信号一并熄灭
+          continue;
+        }
 
         const provider = getProvider(binding.providerId);
         if (!provider?.capabilities.nativeTranscript || !provider.pollNativeEnhancements) continue;
@@ -112,8 +155,13 @@ export class TranscriptWatcher {
             },
             this.#cursors.get(binding.paneId),
           );
-          if (!result) continue;
+          if (!result) {
+            this.#located.delete(binding.paneId); // 定位不到文件 = 镜像没在工作
+            continue;
+          }
+          this.#located.add(binding.paneId);
 
+          if (this.#cursors.get(binding.paneId) !== result.nextCursor) cursorsDirty = true;
           this.#cursors.set(binding.paneId, result.nextCursor);
           if (result.source) this.#watchFile(binding.paneId, result.source);
 
@@ -127,6 +175,7 @@ export class TranscriptWatcher {
           }
           for (const item of items) collected.push({ binding, item });
         } catch (err) {
+          this.#located.delete(binding.paneId); // 这一轮没读成，别再声称镜像在工作
           log.warn('拉取 transcript 失败', { paneId: binding.paneId, err: String(err) });
         }
       }
@@ -135,7 +184,11 @@ export class TranscriptWatcher {
       for (const paneId of [...this.#fileWatches.keys()]) {
         if (!activePanes.has(paneId)) this.#closeWatch(paneId);
       }
+      for (const paneId of [...this.#located]) {
+        if (!activePanes.has(paneId)) this.#located.delete(paneId);
+      }
 
+      if (cursorsDirty) this.#persistCursors();
       if (collected.length) await this.#deps.onMessages(collected);
     } finally {
       this.#running = false;

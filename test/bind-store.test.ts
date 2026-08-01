@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BindStore, computeFingerprint, type Binding } from '../src/core/bind-store.ts';
@@ -74,8 +74,8 @@ test('落盘后重新载入仍在', () => {
 test('patch 更新字段并刷新 updatedAt', async () => {
   const { store, cleanup } = tempStore();
   store.upsert(binding({ updatedAt: '2020-01-01T00:00:00.000Z' }));
-  const next = store.patch('-100123', 7, { notifyLevel: 'verbose' });
-  assert.equal(next?.notifyLevel, 'verbose');
+  const next = store.patch('-100123', 7, { notifyLevel: 'info' });
+  assert.equal(next?.notifyLevel, 'info');
   assert.notEqual(next?.updatedAt, '2020-01-01T00:00:00.000Z');
   cleanup();
 });
@@ -154,5 +154,19 @@ test('同一话题重复解绑，released 只留最后一次', () => {
   const rec = store.getReleased('-100123', 7);
   assert.equal(rec?.paneId, '%22');
   assert.equal(rec?.providerId, 'codex');
+  cleanup();
+});
+
+test('磁盘里的旧级别名 verbose 载入时迁移为 info', () => {
+  const { store, file, cleanup } = tempStore();
+  store.upsert(binding({ threadId: 7, paneId: '%14' }));
+
+  // 模拟更名前写入的 bindings.json
+  const persisted = JSON.parse(readFileSync(file, 'utf8'));
+  persisted.bindings[0].notifyLevel = 'verbose';
+  writeFileSync(file, JSON.stringify(persisted));
+
+  const reopened = new BindStore(file);
+  assert.equal(reopened.getByThread('-100123', 7)?.notifyLevel, 'info');
   cleanup();
 });

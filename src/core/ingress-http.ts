@@ -18,9 +18,12 @@ const log = logger('ingress');
 export type IngressDeps = {
   config: Config;
   broker: DecisionBroker;
-  /** 事件已 normalize，交给 app 层做绑定查找与推送 */
-  /** 返回 `bound: false` 表示没有对应绑定：这个 agent 没托管给 Bot，别 hold 它的 hook */
-  onEvent(event: NormalizedEvent): Promise<{ bound: boolean }>;
+  /**
+   * 事件已 normalize，交给 app 层做绑定查找与推送。
+   * `held: true` = app 层真的建了待决策并推了按钮，这次请求才值得 hold；
+   * 光看事件属性（blocking）hold 会在 provider 没有决策能力时让 hook 白等超时。
+   */
+  onEvent(event: NormalizedEvent): Promise<{ bound: boolean; held: boolean }>;
 };
 
 function normalizeWith(
@@ -52,25 +55,6 @@ export function createIngressServer(deps: IngressDeps): Server {
 
       if (req.method === 'GET' && url.pathname === '/health') {
         sendJson(res, 200, { ok: true, pid: process.pid });
-        return;
-      }
-
-      // hook 重试/兜底：单独查一个已存在的决策
-      if (req.method === 'GET' && url.pathname.startsWith('/decision/')) {
-        const id = url.pathname.slice('/decision/'.length);
-        const wait = url.searchParams.get('wait') === '1';
-        const pending = broker.get(id);
-        if (!pending) {
-          sendJson(res, 404, { ok: false, error: 'unknown correlation id' });
-          return;
-        }
-        const result = wait
-          ? await broker.wait(id, Math.min(broker.timeoutMs, 120_000))
-          : {
-              resolved: Boolean(pending.resolvedWith),
-              response: pending.resolvedWith?.response,
-            };
-        sendJson(res, 200, { ok: true, ...result });
         return;
       }
 
@@ -119,9 +103,9 @@ export function createIngressServer(deps: IngressDeps): Server {
         return;
       }
 
-      let bound = false;
+      let held = false;
       try {
-        ({ bound } = await onEvent(event));
+        ({ held } = await onEvent(event));
       } catch (err) {
         log.error('事件处理失败', err);
         sendJson(res, 500, { ok: false, error: 'handler failed' });
@@ -129,9 +113,9 @@ export function createIngressServer(deps: IngressDeps): Server {
       }
 
       // 阻塞式决策：hold 住这次请求，等用户拍板。
-      // 但只在**绑定了**的时候 hold —— 没绑定就没人会去点那个按钮，
-      // hold 满 90s 只会让终端前的你干等着，还不如立刻放行让 TUI 自己弹。
-      if (event.blocking && event.correlationId && bound) {
+      // 只在 app 层**真的建了待决策**时 hold —— 没绑定、或 provider 没有决策
+      // 能力时都没人会去点按钮，hold 满 90s 只会让终端前的你干等着。
+      if (held && event.correlationId) {
         const provider = getProvider(event.providerId);
         const { resolved, response } = await broker.wait(
           event.correlationId,

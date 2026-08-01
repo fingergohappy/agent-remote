@@ -2,6 +2,7 @@
 import type { AppContext } from './context.ts';
 import { logger } from '../infra/logger.ts';
 import { getProvider } from '../providers/registry.ts';
+import { escapeHtml } from '../telegram/format.ts';
 
 const log = logger('decision-flow');
 
@@ -43,6 +44,9 @@ export async function resolveDecision(
 
   log.info('决策已下发', { correlationId: args.correlationId, decisionId: args.decisionId });
 
+  // hook 被唤醒，agent 接着跑（deny 也一样 —— 它会换个做法或收尾）
+  if (pending.chatId) ctx.typing?.start(pending.chatId, pending.threadId);
+
   // 编辑原消息，把按钮换成结果，避免重复点击
   if (pending.chatId && pending.messageId) {
     await ctx.egress
@@ -50,15 +54,11 @@ export async function resolveDecision(
         chatId: pending.chatId,
         threadId: pending.threadId,
         editMessageId: pending.messageId,
-        text: `🔐 <b>${result.note ?? '已处理'}</b>\n<s>${escape(pending.event.summary ?? '')}</s>`,
+        text: `🔐 <b>${result.note ?? '已处理'}</b>\n<s>${escapeHtml(pending.event.summary ?? '')}</s>`,
         parseMode: 'HTML',
       })
       .catch((err) => log.warn('编辑决策消息失败', err));
   }
 
   return { ok: true, note: result.note ?? '已处理' };
-}
-
-function escape(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }

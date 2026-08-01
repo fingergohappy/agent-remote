@@ -9,7 +9,7 @@ import type { InlineButton } from '../core/egress-queue.ts';
 import { logger } from '../infra/logger.ts';
 import { getProvider } from '../providers/registry.ts';
 import type { AgentProvider, HistoryResult } from '../providers/types.ts';
-import { escapeHtml, formatHistory, historyHeader, renderHistoryPage } from '../telegram/format.ts';
+import { escapeHtml, formatHistory, historyHeader, layoutHistoryPages } from '../telegram/format.ts';
 
 const log = logger('history-flow');
 
@@ -119,17 +119,16 @@ export async function buildHistoryPage(
   if ('message' in result) return { ok: false, message: result.message };
 
   const items = result.items.filter((i) => i.kind !== 'tool');
-  if (!items.length) return { ok: false, message: '未找到会话记录。' };
+  const layout = layoutHistoryPages(items, { size });
+  if (!layout.length) return { ok: false, message: '未找到会话记录。' };
 
-  const pages = Math.ceil(items.length / size);
+  const pages = layout.length;
   const page = pageReq <= 0 ? pages : Math.min(Math.max(pageReq, 1), pages);
-  const start = (page - 1) * size;
-  const pageItems = items.slice(start, start + size);
+  const cur = layout[page - 1]!;
 
-  const body = renderHistoryPage(pageItems);
   const atWindowCap = items.length >= HISTORY_WINDOW;
   const header =
-    `📜 <b>${page}/${pages}</b> 页 · 第 ${start + 1}–${start + pageItems.length} 条` +
+    `📜 <b>${page}/${pages}</b> 页 · ${cur.label}` +
     `（共 ${items.length}${atWindowCap ? '+' : ''} 条）`;
   const source = result.source ? `\n<i>${escapeHtml(result.source)}</i>` : '';
 
@@ -145,7 +144,7 @@ export async function buildHistoryPage(
 
   return {
     ok: true,
-    text: `${header}${source}\n\n${body.text}`,
+    text: `${header}${source}\n\n${cur.body}`,
     buttons: [nav],
     page,
     pages,

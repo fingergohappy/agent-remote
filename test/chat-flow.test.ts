@@ -14,7 +14,6 @@ import { join } from 'node:path';
 import { handleUserText } from '../src/app/chat-flow.ts';
 import type { AppContext } from '../src/app/context.ts';
 import { loadConfig } from '../src/config.ts';
-import { ActivityTracker } from '../src/core/activity.ts';
 import { AgentIndex } from '../src/core/agent-index.ts';
 import { BindStore, type Binding } from '../src/core/bind-store.ts';
 import { DecisionBroker } from '../src/core/decision-broker.ts';
@@ -35,7 +34,7 @@ function binding(over: Partial<Binding> = {}): Binding {
     display: 'ops:1.1',
     title: '🤖 %999999 claude',
     ownedByUs: false,
-    notifyLevel: 'verbose',
+    notifyLevel: 'info',
     createdAt: now,
     updatedAt: now,
     ...over,
@@ -68,11 +67,14 @@ function harness(t: { after(fn: () => void): void }): {
     config,
     store: new BindStore(join(dir, 'bindings.json')),
     index: new AgentIndex(),
-    activity: new ActivityTracker(config.terminalActiveWindowMs),
     echo: new EchoGuard(),
-    broker: new DecisionBroker(join(dir, 'run'), 1000),
+    broker: new DecisionBroker(1000),
     egress: new EgressQueue(transport),
-    mirror: { forget: (paneId) => forgotten.push(paneId), kick: () => {} },
+    mirror: {
+      forget: (paneId) => void forgotten.push(paneId),
+      kick: () => {},
+      isMirroring: () => false,
+    },
     topics: {
       async createTopic() {
         return { threadId: 0, created: false, degraded: true };
@@ -109,7 +111,6 @@ test('pane 已死 → 解绑并清光所有 per-pane 缓存', async (t) => {
   app.store.upsert(b);
 
   // 先把各处都塞上这个 pane 的痕迹，才能验证真的被清掉
-  app.activity.noteLocalInput(b.paneId);
   app.index.noteEvent({ paneId: b.paneId, providerId: 'claude', sessionId: 'sess-1' });
   app.echo.note(b.paneId, '之前发过的话');
 
@@ -120,7 +121,6 @@ test('pane 已死 → 解绑并清光所有 per-pane 缓存', async (t) => {
   assert.match(r.ok === false ? r.message : '', /已自动解绑/);
 
   assert.equal(app.store.getByThread('111', 42), null, 'store 里的绑定要没');
-  assert.equal(app.activity.lastLocalInputAt(b.paneId), undefined, '活跃度要清');
   assert.equal(app.index.get(b.paneId), undefined, 'index 反查要清');
   assert.equal(app.echo.consume(b.paneId, '之前发过的话'), false, '回声记录要清');
   assert.deepEqual(forgotten, [b.paneId], 'mirror 游标要清 —— 漏了会从旧 offset 接着读');

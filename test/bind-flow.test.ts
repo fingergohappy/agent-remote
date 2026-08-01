@@ -21,13 +21,12 @@ import {
 } from '../src/app/bind-flow.ts';
 import type { AppContext, TopicEnsureResult, TopicManager } from '../src/app/context.ts';
 import { loadConfig } from '../src/config.ts';
-import { ActivityTracker } from '../src/core/activity.ts';
 import { AgentIndex } from '../src/core/agent-index.ts';
 import { BindStore, computeFingerprint } from '../src/core/bind-store.ts';
 import { DecisionBroker } from '../src/core/decision-broker.ts';
 import { EchoGuard } from '../src/core/echo-guard.ts';
 import { EgressQueue, type Transport } from '../src/core/egress-queue.ts';
-import { instanceTitle, projectLabel, sortForDisplay } from '../src/core/discover.ts';
+import { instanceTitle, projectLabel, sortForDisplay, verifyPresence } from '../src/core/discover.ts';
 import { registerProvider, resetRegistry } from '../src/providers/registry.ts';
 import type { AgentProvider } from '../src/providers/types.ts';
 
@@ -55,7 +54,6 @@ function fakeProvider(paneIds: string[]): AgentProvider {
       nativeTranscript: false,
       resumeSession: false,
       spawnFromBot: false,
-      activitySuppress: false,
     },
     detect: (ctx) =>
       paneIds.includes(ctx.paneId) ? { providerId: 'fake', confidence: 1, label: 'fake' } : null,
@@ -134,9 +132,8 @@ function harness(
     config,
     store: new BindStore(join(dir, 'bindings.json')),
     index: new AgentIndex(),
-    activity: new ActivityTracker(config.terminalActiveWindowMs),
     echo: new EchoGuard(),
-    broker: new DecisionBroker(join(dir, 'run'), 1000),
+    broker: new DecisionBroker(1000),
     egress: new EgressQueue(transport),
     topics,
   };
@@ -448,7 +445,7 @@ test('bind-flow 选工位', { skip: !hasTmux() }, async (t) => {
     if (!r.ok) return;
     const pid = Number(tmux(['display-message', '-p', '-t', paneA, '#{pane_pid}']).trim());
     assert.equal(r.binding.fingerprint, computeFingerprint(paneA, pid, 'fake'));
-    assert.equal(await h.app.store.validate(r.binding), 'ok');
+    assert.equal(await verifyPresence(r.binding), 'ok');
     h.cleanup();
   });
 });
