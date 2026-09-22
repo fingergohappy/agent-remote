@@ -1,5 +1,8 @@
 # agent-remote
 
+[![npm](https://img.shields.io/npm/v/@fingergohappy2026/agent-remote)](https://www.npmjs.com/package/@fingergohappy2026/agent-remote)
+[![node](https://img.shields.io/node/v/@fingergohappy2026/agent-remote)](https://nodejs.org)
+
 手机上的 **coding agent 对讲机**：独立 Telegram Bot + 常驻服务，遥控本机 tmux 里的
 Claude Code / Codex / Pi。绑定单位是 **pane（`%14`）**，不是 window —— 一个窗口里开三个 agent 也不会串线。
 
@@ -45,6 +48,8 @@ Pi 没有 shell hook，走的是 `hooks/pi-extension.ts`。`setup` 把它拷到
 
 ### 1. 安装
 
+需要 **Node ≥ 22.18.0**（源码方式直接跑 `.ts`，靠的是 Node 自带的类型剥离）。
+
 ```bash
 # 方式 A：npm（推荐）
 npm install -g @fingergohappy2026/agent-remote
@@ -70,7 +75,8 @@ agent-remote setup
 
 然后补上 `~/.config/agent-remote/.env` 里的两个必填项：
 
-- `TELEGRAM_BOT_TOKEN` —— 找 @BotFather 建一个独立 Bot
+- `TELEGRAM_BOT_TOKEN` —— 找 @BotFather 建一个独立 Bot。**建完顺手在 Bot Settings 里开
+  threads**，否则私聊没有话题，多个 agent 只能挤一个工位（详见下面第 4 步）
 - `ALLOWED_USERS` —— 你自己的 Telegram user id（白名单）
 
 > 配置目录遵循 XDG：`$XDG_CONFIG_HOME/agent-remote`，未设则 `~/.config/agent-remote`；
@@ -88,7 +94,7 @@ agent-remote           # 前台启动
 
 ### 4. 手机上开工
 
-tmux 里跑起 claude / codex → 给 Bot 发 `/agents` → 点按钮绑定 →
+tmux 里跑起 claude / codex / pi → 给 Bot 发 `/agents` → 点按钮绑定 →
 对话全文进话题、打字回传终端、授权请求手机上点。
 
 **要多工位就得有话题（Topics）**，两条路都行：
@@ -151,7 +157,7 @@ agent 自己的会话文件（Claude 的 jsonl / Codex 的 rollout / Pi 的 sess
 
 ```bash
 npm run typecheck   # tsc --noEmit
-npm test            # node:test，170+ 个用例
+npm test            # node:test，250+ 个用例（含 tmux 真机用例，缺 tmux 会自动跳过）
 npm run check       # 两个一起
 npm run build       # 编译到 dist/（生产可用 node dist/main.js）
 ```
@@ -171,7 +177,7 @@ src/
   telegram/        bot · commands · topics · format
   infra/           tmux · process-tree · http · state-fs · logger
 hooks/             装到 agent 那边的薄脚本
-plugins/           Claude Code / Codex 插件壳（hook 注册的分发通道，见 plugins/README.md）
+plugins/           Claude Code / Codex / Pi 的插件壳（hook 与扩展的分发通道，见 plugins/README.md）
 ```
 
 **依赖方向只许向下。** `providers/` 不得 import `telegram/`，`core/` 不得解析任何
