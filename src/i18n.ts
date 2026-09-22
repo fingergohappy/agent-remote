@@ -244,8 +244,8 @@ const M = {
     en: '🤖 <b>{n}</b> agent(s) · <b>{m}</b> bound',
   },
   'agents-legend': {
-    zh: '🟠 claude · 🟢 codex · ➕ 绑定 · 🔓 解绑',
-    en: '🟠 claude · 🟢 codex · ➕ bind · 🔓 unbind',
+    zh: '🟠 claude · 🟢 codex · 🔵 pi · ➕ 绑定 · 🔓 解绑',
+    en: '🟠 claude · 🟢 codex · 🔵 pi · ➕ bind · 🔓 unbind',
   },
 
   // ── 命令菜单 ──

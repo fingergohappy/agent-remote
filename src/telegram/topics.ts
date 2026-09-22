@@ -137,6 +137,7 @@ export type TopicColor = (typeof TOPIC_COLORS)[keyof typeof TOPIC_COLORS];
 export function providerTopicColor(providerId: string): TopicColor | undefined {
   if (providerId === 'claude') return TOPIC_COLORS.orange;
   if (providerId === 'codex') return TOPIC_COLORS.green;
+  if (providerId === 'pi') return TOPIC_COLORS.blue;
   return undefined; // 不认识的 provider 交给 Telegram 随机配色
 }
 

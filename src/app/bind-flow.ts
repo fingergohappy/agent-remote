@@ -15,6 +15,7 @@ import type { InlineButton } from '../core/egress-queue.ts';
 import { listPanes } from '../infra/tmux.ts';
 import { snapshotProcesses } from '../infra/process-tree.ts';
 import { formatAgentList } from '../telegram/format.ts';
+import { getProvider } from '../providers/registry.ts';
 import { logger } from '../infra/logger.ts';
 import { t } from '../i18n.ts';
 
@@ -247,6 +248,21 @@ export async function bindPane(
   };
 
   const { replaced } = ctx.store.upsert(binding);
+
+  // hook 还没来就先把原生会话钉上，镜像不用干等到第一个事件。
+  const provider = getProvider(inst.providerId);
+  if (provider?.resolveNativeSession && !binding.sessionId && !binding.transcriptPath) {
+    const loc = await provider.resolveNativeSession({ paneId: inst.paneId, cwd: inst.cwd }).catch(() => null);
+    if (loc?.transcriptPath || loc?.sessionId) {
+      const patched = ctx.store.patch(args.chatId, threadId, {
+        sessionId: loc.sessionId,
+        transcriptPath: loc.transcriptPath,
+      });
+      if (patched) Object.assign(binding, patched);
+    }
+  }
+  ctx.mirror?.kick();
+
   log.info('已绑定', { paneId: binding.paneId, threadId, chatId: args.chatId });
 
   return { ok: true, binding, created, degraded, replaced, reused: false };

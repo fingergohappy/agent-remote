@@ -116,6 +116,8 @@ export type HistoryRef = {
   sessionId?: string;
   transcriptPath?: string;
   cwd?: string;
+  /** 首次挂上 transcript 时，把这个时间之后的增量补推（绑定期的漏网回复） */
+  since?: string;
 };
 
 export type HistoryItem = {
@@ -123,6 +125,8 @@ export type HistoryItem = {
   text: string;
   ts?: string;
   kind?: 'message' | 'tool' | 'reasoning';
+  /** assistant 这一轮已经收尾（不是 toolUse）。镜像用来熄灭 typing */
+  terminal?: boolean;
 };
 
 export type HistoryResult = {
@@ -174,7 +178,15 @@ export interface AgentProvider {
   pollNativeEnhancements?(
     ref: HistoryRef,
     cursor: unknown,
-  ): Promise<{ nextCursor: unknown; messages: HistoryItem[]; source?: string } | null>;
+  ): Promise<{ nextCursor: unknown; messages: HistoryItem[]; source?: string; idle?: boolean } | null>;
+
+  /**
+   * 没等来 hook 时，靠 cwd / 进程侧线索把原生会话定位出来。
+   * 绑定时和镜像空转时调用；找不到就返回 null，不瞎猜别的项目。
+   */
+  resolveNativeSession?(
+    ref: HistoryRef,
+  ): Promise<{ sessionId?: string; transcriptPath?: string } | null>;
 
   /** 可选：spawn 命令行 */
   spawnCommand?(opts: { cwd: string; resumeId?: string }): string[];

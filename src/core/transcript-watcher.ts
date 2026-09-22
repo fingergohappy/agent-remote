@@ -31,6 +31,8 @@ export type MirroredMessage = {
 export type WatcherDeps = {
   store: BindStore;
   onMessages(messages: MirroredMessage[]): Promise<void>;
+  /** transcript 显示这一轮已经收尾（没 hook 也能熄灭 typing） */
+  onIdle?(binding: Binding): void;
   /** 单个绑定单轮最多吐多少条，防止一次 compact 之类把话题刷爆 */
   maxPerTick?: number;
   /** kick 的防抖窗口：hook 风暴 / 连续写盘时合并成一轮 */
@@ -135,7 +137,8 @@ export class TranscriptWatcher {
       const collected: MirroredMessage[] = [];
       const activePanes = new Set<string>();
 
-      for (const binding of this.#deps.store.list()) {
+      for (const raw of this.#deps.store.list()) {
+        let binding = raw;
         if (binding.notifyLevel !== 'info') {
           this.#located.delete(binding.paneId); // 降级后不再镜像，健康信号一并熄灭
           continue;
@@ -144,14 +147,35 @@ export class TranscriptWatcher {
         const provider = getProvider(binding.providerId);
         if (!provider?.capabilities.nativeTranscript || !provider.pollNativeEnhancements) continue;
 
+        // hook 还没来（比如 pi 扩展没加载）时，靠 cwd 把会话钉上，否则永远镜像失明。
+        if (!binding.sessionId && !binding.transcriptPath && provider.resolveNativeSession) {
+          try {
+            const loc = await provider.resolveNativeSession({
+              paneId: binding.paneId,
+              cwd: binding.cwd,
+            });
+            if (loc?.transcriptPath || loc?.sessionId) {
+              binding =
+                this.#deps.store.patch(binding.chatId, binding.threadId, {
+                  sessionId: loc.sessionId ?? binding.sessionId,
+                  transcriptPath: loc.transcriptPath ?? binding.transcriptPath,
+                }) ?? binding;
+            }
+          } catch (err) {
+            log.warn('定位原生会话失败', { paneId: binding.paneId, err: String(err) });
+          }
+        }
+
         activePanes.add(binding.paneId);
         try {
+          const hadCursor = this.#cursors.has(binding.paneId);
           const result = await provider.pollNativeEnhancements(
             {
               paneId: binding.paneId,
               sessionId: binding.sessionId,
               transcriptPath: binding.transcriptPath,
               cwd: binding.cwd,
+              since: hadCursor ? undefined : binding.createdAt,
             },
             this.#cursors.get(binding.paneId),
           );
@@ -174,6 +198,7 @@ export class TranscriptWatcher {
             });
           }
           for (const item of items) collected.push({ binding, item });
+          if (result.idle) this.#deps.onIdle?.(binding);
         } catch (err) {
           this.#located.delete(binding.paneId); // 这一轮没读成，别再声称镜像在工作
           log.warn('拉取 transcript 失败', { paneId: binding.paneId, err: String(err) });

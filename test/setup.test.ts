@@ -4,16 +4,20 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   claudeMergeSpec,
   codexMergeSpec,
   isOurCommand,
+  isOurPiExtension,
   mergeOurHooks,
+  mergePiExtension,
   removeOurHooks,
+  removePiExtension,
   runSetup,
+  upsertEnvKey,
   type HooksMap,
 } from '../src/setup.ts';
 
@@ -88,6 +92,8 @@ function tmpPaths() {
       repoRoot: join(import.meta.dirname, '..'),
       claudeSettings: join(dir, 'claude', 'settings.json'),
       codexHooks: join(dir, 'codex', 'hooks.json'),
+      piSettings: join(dir, 'pi', 'settings.json'),
+      piExtDir: join(dir, 'pi', 'extensions'),
       home: join(dir, 'agent-remote-home'),
     },
   };
@@ -108,6 +114,15 @@ test('runSetup 冒烟：建 .env（600 + secret）、写两侧配置、重跑幂
 
   const codex = JSON.parse(readFileSync(paths.codexHooks, 'utf8'));
   assert.ok(codex.hooks.PermissionRequest);
+
+  const piExt = join(paths.piExtDir, 'agent-remote.ts');
+  assert.ok(existsSync(piExt));
+  assert.match(readFileSync(piExt, 'utf8'), /agent-remote 的 Pi 扩展/);
+  // 不再把仓库绝对路径写进 settings.json
+  if (existsSync(paths.piSettings)) {
+    const pi = JSON.parse(readFileSync(paths.piSettings, 'utf8')) as { extensions?: string[] };
+    assert.ok(!(pi.extensions ?? []).some((p) => p.endsWith('hooks/pi-extension.ts')));
+  }
 
   // 重跑：内容不变，也不产生备份文件
   await runSetup([], paths);
@@ -142,4 +157,72 @@ test('坏 JSON 不动、退出码 1', async () => {
   const code = await runSetup([], paths);
   assert.equal(code, 1);
   assert.equal(readFileSync(paths.claudeSettings, 'utf8'), '{ not json');
+});
+
+test('isOurPiExtension 只认 hooks/pi-extension.ts 结尾', () => {
+  assert.ok(isOurPiExtension('/repo/hooks/pi-extension.ts'));
+  assert.ok(!isOurPiExtension('/repo/hooks/claude-hook.sh'));
+  assert.ok(!isOurPiExtension('/home/u/.pi/agent/extensions/timer.ts'));
+});
+
+test('mergePiExtension 幂等、不碰别人的扩展；uninstall 只摘我们的', () => {
+  const foreign = { theme: 'dark', extensions: ['/x/timer.ts'] };
+  const once = mergePiExtension(foreign, '/repo/hooks/pi-extension.ts');
+  const twice = mergePiExtension(once, '/repo/hooks/pi-extension.ts');
+  assert.deepEqual(twice, once);
+  assert.deepEqual(once.extensions, ['/x/timer.ts', '/repo/hooks/pi-extension.ts']);
+  assert.equal(once.theme, 'dark');
+
+  const removed = removePiExtension(once);
+  assert.deepEqual(removed, foreign);
+});
+
+test('runSetup 把 Pi 扩展拷到 extensions/，并摘掉 settings.json 里的旧路径', async () => {
+  const { paths } = tmpPaths();
+  mkdirSync(join(paths.piSettings, '..'), { recursive: true });
+  writeFileSync(
+    paths.piSettings,
+    JSON.stringify(
+      { theme: 'dark', extensions: ['/old/hooks/pi-extension.ts', '/x/timer.ts'] },
+      null,
+      2,
+    ),
+  );
+
+  await runSetup([], paths);
+  const dest = join(paths.piExtDir, 'agent-remote.ts');
+  assert.ok(existsSync(dest));
+  assert.equal(readFileSync(dest, 'utf8'), readFileSync(join(paths.repoRoot, 'hooks', 'pi-extension.ts'), 'utf8'));
+
+  const pi = JSON.parse(readFileSync(paths.piSettings, 'utf8')) as {
+    theme?: string;
+    extensions?: string[];
+  };
+  assert.equal(pi.theme, 'dark');
+  assert.deepEqual(pi.extensions, ['/x/timer.ts']);
+
+  await runSetup(['--uninstall'], paths);
+  assert.ok(!existsSync(dest));
+  const after = JSON.parse(readFileSync(paths.piSettings, 'utf8')) as { extensions?: string[] };
+  assert.deepEqual(after.extensions, ['/x/timer.ts']);
+});
+
+test('runSetup --approval 写 PI_APPROVAL=1，再跑普通 setup 改回 0', async () => {
+  const { paths } = tmpPaths();
+  await runSetup(['--approval'], paths);
+  const env = readFileSync(join(paths.home, '.env'), 'utf8');
+  assert.match(env, /^PI_APPROVAL=1$/m);
+
+  await runSetup([], paths);
+  assert.match(readFileSync(join(paths.home, '.env'), 'utf8'), /^PI_APPROVAL=0$/m);
+});
+
+test('upsertEnvKey 替换已有键、保留其它行', () => {
+  const { paths } = tmpPaths();
+  mkdirSync(paths.home, { recursive: true });
+  const envPath = join(paths.home, '.env');
+  writeFileSync(envPath, 'FOO=1\nBAR=2\n');
+  upsertEnvKey(envPath, 'BAR', '9');
+  upsertEnvKey(envPath, 'BAZ', '3');
+  assert.equal(readFileSync(envPath, 'utf8'), 'FOO=1\nBAR=9\nBAZ=3\n');
 });

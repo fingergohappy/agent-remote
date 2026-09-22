@@ -5,14 +5,16 @@
  *   - ~/.claude/settings.json 合并观察类 hook；--approval 追加阻塞式 PreToolUse
  *   - ~/.codex/hooks.json 合并观察类 hook + PermissionRequest（codex 没有等价于
  *     Claude Notification 的事件，没有它，绑定的 codex 等授权时手机端无信号）
- *   - --uninstall 摘除我们写入的条目，别人的 hook 一律不碰
+ *   - ~/.pi/agent/extensions/agent-remote.ts 拷入 Pi 扩展（不依赖仓库绝对路径）
+ *     同时摘掉 settings.json 里旧的 hooks/pi-extension.ts 路径条目
+ *   - --uninstall 摘除我们写入的条目，别人的 hook / 扩展一律不碰
  *
  * 幂等策略：合并 = 先移除「我们的」条目再写入当前路径 —— 重复跑不累积，
  * 仓库挪了位置重跑即自动修正路径。「我们的」由命令路径判定：
  * 任何以 hooks/claude-hook.sh、hooks/codex-hook.sh 结尾的命令（含插件副本的
  * scripts/ 前缀不算 —— 插件条目归插件管理器管，这里只认裸脚本路径）。
  */
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -180,12 +182,98 @@ async function checkHealth(host: string, port: number): Promise<boolean> {
   }
 }
 
+// ── Pi settings.json（extensions 数组，不是 hooks 映射） ─────────────────────────
+
+const PI_EXT_SUFFIX = 'hooks/pi-extension.ts';
+
+export function isOurPiExtension(path: string): boolean {
+  return path.endsWith(PI_EXT_SUFFIX);
+}
+
+function asStringList(v: unknown): string[] {
+  return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+}
+
+export function mergePiExtension(
+  doc: Record<string, unknown>,
+  extPath: string,
+): Record<string, unknown> {
+  const kept = asStringList(doc.extensions).filter((p) => !isOurPiExtension(p));
+  return { ...doc, extensions: [...kept, extPath] };
+}
+
+export function removePiExtension(doc: Record<string, unknown>): Record<string, unknown> {
+  const kept = asStringList(doc.extensions).filter((p) => !isOurPiExtension(p));
+  const next = { ...doc };
+  if (kept.length) next.extensions = kept;
+  else delete next.extensions;
+  return next;
+}
+
+function applyJsonFile(
+  path: string,
+  transform: (doc: Record<string, unknown>) => Record<string, unknown>,
+): FileReport {
+  const doc = loadJson(path);
+  if (doc === null) {
+    return { path, action: 'skipped', note: '不是合法 JSON，手工处理（见 hooks/INSTALL.md）' };
+  }
+  const next = transform(doc);
+  if (JSON.stringify(next) === JSON.stringify(doc)) return { path, action: 'unchanged' };
+
+  const existed = existsSync(path);
+  backupThenWrite(path, JSON.stringify(next, null, 2) + '\n');
+  return { path, action: existed ? 'updated' : 'created' };
+}
+
+function envHasKey(path: string, key: string): boolean {
+  if (!existsSync(path)) return false;
+  return new RegExp(`^${key}=`, 'm').test(readFileSync(path, 'utf8'));
+}
+
+/** 已有键则替换，没有就追加。不碰其它行。 */
+export function upsertEnvKey(path: string, key: string, value: string): void {
+  const raw = existsSync(path) ? readFileSync(path, 'utf8') : '';
+  const line = `${key}=${value}`;
+  const next = new RegExp(`^${key}=`, 'm').test(raw)
+    ? raw.replace(new RegExp(`^${key}=.*$`, 'm'), line)
+    : `${raw.replace(/\s*$/, '')}\n${line}\n`;
+  writeFileSync(path, next, { mode: 0o600 });
+}
+
 // ── CLI 入口 ──────────────────────────────────────────────────────────────────
+
+export const PI_EXT_FILENAME = 'agent-remote.ts';
+
+/** 把仓库里的扩展拷到 ~/.pi/agent/extensions/，不依赖本机绝对路径。 */
+export function installPiExtensionFile(src: string, dest: string): FileReport {
+  let body: string;
+  try {
+    body = readFileSync(src, 'utf8');
+  } catch {
+    return { path: dest, action: 'skipped', note: `源文件不存在: ${src}` };
+  }
+  if (existsSync(dest) && readFileSync(dest, 'utf8') === body) {
+    return { path: dest, action: 'unchanged' };
+  }
+  const existed = existsSync(dest);
+  mkdirSync(dirname(dest), { recursive: true });
+  writeFileSync(dest, body);
+  return { path: dest, action: existed ? 'updated' : 'created' };
+}
+
+export function removePiExtensionFile(dest: string): FileReport {
+  if (!existsSync(dest)) return { path: dest, action: 'unchanged' };
+  unlinkSync(dest);
+  return { path: dest, action: 'updated', note: 'removed' };
+}
 
 export type SetupPaths = {
   repoRoot: string;
   claudeSettings: string;
   codexHooks: string;
+  piSettings: string;
+  piExtDir: string;
   home: string;
 };
 
@@ -195,6 +283,8 @@ export function defaultPaths(env: NodeJS.ProcessEnv = process.env): SetupPaths {
     repoRoot: join(import.meta.dirname, '..'),
     claudeSettings: join(homeDir, '.claude', 'settings.json'),
     codexHooks: join(homeDir, '.codex', 'hooks.json'),
+    piSettings: join(homeDir, '.pi', 'agent', 'settings.json'),
+    piExtDir: join(homeDir, '.pi', 'agent', 'extensions'),
     home: defaultHome(env),
   };
 }
@@ -209,19 +299,23 @@ export async function runSetup(
   if (unknown.length) {
     process.stdout.write(
       `用法: agent-remote setup [--approval] [--uninstall]\n` +
-        `  --approval   Claude 侧追加阻塞式 PreToolUse（手机上批 Bash|Write|Edit）\n` +
-        `  --uninstall  摘除 setup 写入的 hook 条目（不碰其它工具的条目）\n`,
+        `  --approval   手机上批 Claude PreToolUse / Pi 的 bash|write|edit\n` +
+        `  --uninstall  摘除 setup 写入的 hook / 扩展条目（不碰其它工具的条目）\n`,
     );
     return unknown[0] === '--help' || unknown[0] === '-h' ? 0 : 1;
   }
 
   const claudeHook = join(paths.repoRoot, 'hooks', 'claude-hook.sh');
   const codexHook = join(paths.repoRoot, 'hooks', 'codex-hook.sh');
+  const piExtSrc = join(paths.repoRoot, 'hooks', 'pi-extension.ts');
+  const piExtDest = join(paths.piExtDir, PI_EXT_FILENAME);
   const reports: FileReport[] = [];
 
   if (uninstall) {
     reports.push(applyHooksFile(paths.claudeSettings, removeOurHooks));
     reports.push(applyHooksFile(paths.codexHooks, removeOurHooks));
+    reports.push(applyJsonFile(paths.piSettings, removePiExtension));
+    reports.push(removePiExtensionFile(piExtDest));
   } else {
     reports.push(ensureEnvFile(paths.home, join(paths.repoRoot, '.env.example')));
 
@@ -239,6 +333,14 @@ export async function runSetup(
         mergeOurHooks(hooks, codexMergeSpec(codexHook, { timeoutSec })),
       ),
     );
+    reports.push(installPiExtensionFile(piExtSrc, piExtDest));
+    // 摘掉旧版写进 settings.json 的仓库绝对路径，改由 extensions/ 自动发现
+    reports.push(applyJsonFile(paths.piSettings, removePiExtension));
+
+    const envPath = join(paths.home, '.env');
+    if (approval || envHasKey(envPath, 'PI_APPROVAL')) {
+      upsertEnvKey(envPath, 'PI_APPROVAL', approval ? '1' : '0');
+    }
   }
 
   const lines: string[] = [];
@@ -262,9 +364,10 @@ export async function runSetup(
       lines.push(`  配置仍在旧位置: mv ${paths.home} ${xdgHome()}（迁移后重启服务）`);
     }
     if (!approval) {
-      lines.push(`  想在手机上批 Claude 的工具调用: 重跑 setup --approval`);
+      lines.push(`  想在手机上批 Claude / Pi 的工具调用: 重跑 setup --approval`);
     }
     lines.push(`  Codex 首次触发 hook 时会要求确认信任，确认一次即可`);
+    lines.push(`  Pi 扩展写入后需重启已开着的 pi 才会加载`);
   }
 
   process.stdout.write(lines.join('\n') + '\n');

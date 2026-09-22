@@ -19,6 +19,7 @@ const COPIES: [string, string][] = [
   ['hooks/agent-remote-hook.sh', 'plugins/codex/scripts/agent-remote-hook.sh'],
   ['hooks/claude-hook.sh', 'plugins/claude/scripts/claude-hook.sh'],
   ['hooks/codex-hook.sh', 'plugins/codex/scripts/codex-hook.sh'],
+  ['hooks/pi-extension.ts', 'plugins/pi/extensions/agent-remote.ts'],
 ];
 
 for (const [source, copy] of COPIES) {

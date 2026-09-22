@@ -1,12 +1,13 @@
 # Hook 安装
 
-两端 hook 都只做一件事：**补上 `paneId` → HMAC 签名 → POST 到本机 ingress**。
-业务逻辑全在常驻服务里，hook 挂了也不会拖垮 agent（任何失败都静默退出 0）。
+Claude / Codex 的 hook、以及 Pi 的扩展，都只做一件事：**补上 `paneId` → HMAC 签名 → POST 到本机 ingress**。
+业务逻辑全在常驻服务里，挂了也不会拖垮 agent（任何失败都静默退出 / 吞掉）。
 
-依赖：`curl`、`jq`、`openssl`。
+Claude / Codex 依赖：`curl`、`jq`、`openssl`。Pi 扩展用 Node 内置 `fetch` / `crypto`，没有额外依赖。
 
-> **一键配置**：`node src/main.ts setup` 会自动把下面两节的 hook 合并写入
-> `~/.claude/settings.json` 与 `~/.codex/hooks.json`（不动你已有的其它 hook），
+> **一键配置**：`node src/main.ts setup` 会自动把 hook 合并写入
+> `~/.claude/settings.json` 与 `~/.codex/hooks.json`，并把 Pi 扩展拷到
+> `~/.pi/agent/extensions/agent-remote.ts`（不动你已有的其它条目），
 > 加 `--approval` 同时装上阻塞授权，`--uninstall` 干净摘除。
 > 本文其余部分是等价的手工路线与字段说明。
 
@@ -130,6 +131,40 @@ notify = ["/home/你的用户名/code/mycode/agent-remote/hooks/codex-hook.sh"]
 
 `/history` 对 Codex 照常可用，读的是 `~/.codex/sessions/**/rollout-*.jsonl`；
 hooks 引擎的事件自带 `transcript_path`，定位会话比 notify 时代的 cwd 启发式更准。
+
+---
+
+## Pi
+
+Pi 没有 Claude 那种 stdin hook，走 TypeScript 扩展。`setup` 会把
+`hooks/pi-extension.ts` 拷到 `~/.pi/agent/extensions/agent-remote.ts`
+（Pi 自动发现这个目录，换机器不用改路径）。
+
+手工装等价于：
+
+```bash
+cp hooks/pi-extension.ts ~/.pi/agent/extensions/agent-remote.ts
+# 或：pi install ./plugins/pi
+```
+
+已开着的 pi 要重启才会加载。
+
+| 事件 | 用途 |
+|------|------|
+| `session_start` | 建立 `paneId ↔ sessionId` 映射，`/history` 才能精确定位会话 |
+| `before_agent_start` | **不推送**，只用于会话索引与镜像触发 |
+| `agent_settled` | 完成通知 |
+| `session_compact` | 上下文压缩 |
+| `session_shutdown` | 会话结束 |
+
+`/history` 读的是 `~/.pi/agent/sessions/--<cwd>--/*.jsonl`。
+
+### 手机上点「允许 / 拒绝」（可选）
+
+`setup --approval` 会在 `.env` 写 `PI_APPROVAL=1`。扩展据此拦截 `bash` / `write` / `edit`：
+POST 阻塞到 ingress，等 Telegram 按钮或超时。超时不替你决定 —— 扩展不拦，pi 接着跑。
+
+手工开的话在 `~/.config/agent-remote/.env` 加一行 `PI_APPROVAL=1`，然后重启 pi。
 
 ---
 

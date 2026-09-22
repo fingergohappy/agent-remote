@@ -1,0 +1,15 @@
+{
+  "name": "agent-remote-pi",
+  "version": "0.1.1",
+  "description": "agent-remote 的 Pi 扩展：把 session / 完成 / 结束事件 POST 到本机 Telegram 桥。服务没在跑时静默跳过。",
+  "keywords": ["pi-package"],
+  "homepage": "https://github.com/fingergohappy/agent-remote",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fingergohappy/agent-remote.git",
+    "directory": "plugins/pi"
+  },
+  "pi": {
+    "extensions": ["./extensions"]
+  }
+}

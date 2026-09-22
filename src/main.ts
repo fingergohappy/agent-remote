@@ -23,6 +23,7 @@ import { logger, setLogLevel } from './infra/logger.ts';
 import { registerProvider } from './providers/registry.ts';
 import { claudeProvider } from './providers/claude/index.ts';
 import { codexProvider } from './providers/codex/index.ts';
+import { piProvider } from './providers/pi/index.ts';
 import {
   createBot,
   createTopicManager,
@@ -42,6 +43,7 @@ const RECONCILE_INTERVAL_MS = 60_000;
 function registerProviders(): void {
   registerProvider(claudeProvider);
   registerProvider(codexProvider);
+  registerProvider(piProvider);
 }
 
 async function runDoctor(): Promise<number> {
@@ -118,14 +120,15 @@ async function main(): Promise<void> {
   });
 
   // 对话镜像：Claude 的 Stop hook 不含回复正文，只能从 transcript 追
+  const typing = new TypingIndicator(createTypingSender(bot.api));
+
   const mirror = new TranscriptWatcher({
     store,
     onMessages: (messages) => handleMirrored(app, messages),
+    onIdle: (b) => typing.stop(b.chatId, b.threadId || undefined),
     // 游标落盘：重启不丢「上次读到哪」，间隙写入的对话照常镜像
     cursorFile: join(config.home, 'mirror-cursors.json'),
   });
-
-  const typing = new TypingIndicator(createTypingSender(bot.api));
 
   const app: AppContext = {
     config,
@@ -182,6 +185,7 @@ async function main(): Promise<void> {
     }
   };
   await reconcile();
+  mirror.kick(); // 已有绑定立刻定位 transcript，不用干等第一轮兜底轮询
   const timer = setInterval(() => void reconcile(), RECONCILE_INTERVAL_MS);
   timer.unref?.();
 

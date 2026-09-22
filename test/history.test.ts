@@ -5,6 +5,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { encodeCwd, parseClaudeLines } from '../src/providers/claude/history.ts';
 import { parseCodexLines } from '../src/providers/codex/history.ts';
+import {
+  encodeCwd as encodePiCwd,
+  parsePiLines,
+  pollPiTranscript,
+  sessionIdFromPath,
+  sessionLooksIdle,
+} from '../src/providers/pi/history.ts';
 import { buildHistoryPage } from '../src/app/history-flow.ts';
 import { layoutHistoryPages } from '../src/telegram/format.ts';
 import { computeFingerprint, type Binding } from '../src/core/bind-store.ts';
@@ -14,6 +21,120 @@ import { claudeProvider } from '../src/providers/claude/index.ts';
 test('cwd 编码与 ~/.claude/projects 下的真实目录名一致', () => {
   assert.equal(encodeCwd('/home/finger/code/mycode/gloss.nvim'), '-home-finger-code-mycode-gloss-nvim');
   assert.equal(encodeCwd('/home/finger/code/mycode/agent-remote'), '-home-finger-code-mycode-agent-remote');
+});
+
+test('Pi cwd 编码与 ~/.pi/agent/sessions 下的真实目录名一致', () => {
+  assert.equal(encodePiCwd('/home/finger/code/mycode/agent-remote'), '--home-finger-code-mycode-agent-remote--');
+  assert.equal(encodePiCwd('/home/finger'), '--home-finger--');
+});
+
+test('Pi jsonl：取 user/assistant 文本，跳过 thinking 与 toolResult', () => {
+  const items = parsePiLines([
+    JSON.stringify({ type: 'session', version: 3, id: 's', cwd: '/home/u/proj' }),
+    JSON.stringify({
+      type: 'message',
+      timestamp: '2026-08-18T07:21:01.603Z',
+      message: { role: 'user', content: [{ type: 'text', text: '帮我看看这个 bug' }] },
+    }),
+    JSON.stringify({
+      type: 'message',
+      timestamp: '2026-08-18T07:21:07.002Z',
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: '内部推理不外泄' },
+          { type: 'text', text: '看起来是空指针。' },
+          { type: 'toolCall', name: 'bash', arguments: { command: 'ls' } },
+        ],
+      },
+    }),
+    JSON.stringify({
+      type: 'message',
+      message: {
+        role: 'toolResult',
+        toolName: 'bash',
+        content: [{ type: 'text', text: 'ok' }],
+      },
+    }),
+    '不是 json',
+  ]);
+  assert.deepEqual(
+    items.map((i) => [i.role, i.text, i.kind]),
+    [
+      ['user', '帮我看看这个 bug', 'message'],
+      ['assistant', '看起来是空指针。', 'message'],
+    ],
+  );
+  assert.equal(items[1]?.terminal, true);
+});
+
+test('Pi sessionId 从文件名拆出来', () => {
+  assert.equal(
+    sessionIdFromPath(
+      '/home/u/.pi/agent/sessions/--home-u--/2026-08-18T07-20-03-976Z_01a013bd-d888-71bf-a6e0-e948ece43ece.jsonl',
+    ),
+    '01a013bd-d888-71bf-a6e0-e948ece43ece',
+  );
+});
+
+test('Pi sessionLooksIdle：最后一条 assistant 收尾才算空闲', () => {
+  assert.equal(sessionLooksIdle([]), true);
+  assert.equal(
+    sessionLooksIdle([{ role: 'user', text: 'hi', kind: 'message' }]),
+    false,
+  );
+  assert.equal(
+    sessionLooksIdle([
+      { role: 'user', text: 'hi', kind: 'message' },
+      { role: 'assistant', text: 'ok', kind: 'message', terminal: true },
+    ]),
+    true,
+  );
+  assert.equal(
+    sessionLooksIdle([
+      { role: 'assistant', text: 'calling', kind: 'message', terminal: false },
+    ]),
+    false,
+  );
+});
+
+test('Pi 首次挂上 transcript 时，since 之后的回复会补推', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'agent-remote-pi-hist-'));
+  const file = join(dir, '2026-08-18T07-20-03-976Z_01a013bd-d888-71bf-a6e0-e948ece43ece.jsonl');
+  writeFileSync(
+    file,
+    [
+      JSON.stringify({
+        type: 'message',
+        timestamp: '2026-08-18T09:00:00.000Z',
+        message: { role: 'user', content: [{ type: 'text', text: '更早的' }] },
+      }),
+      JSON.stringify({
+        type: 'message',
+        timestamp: '2026-08-18T09:30:00.000Z',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: '绑之后的回复' }],
+          stopReason: 'stop',
+        },
+      }),
+    ].join('\n') + '\n',
+  );
+  const first = await pollPiTranscript(
+    { paneId: '%1', transcriptPath: file, since: '2026-08-18T09:26:00.000Z' },
+    undefined,
+  );
+  assert.equal(first?.idle, true);
+  assert.deepEqual(
+    first?.messages.map((m) => m.text),
+    ['绑之后的回复'],
+  );
+  const second = await pollPiTranscript(
+    { paneId: '%1', transcriptPath: file, since: '2026-08-18T09:26:00.000Z' },
+    first?.nextCursor,
+  );
+  assert.deepEqual(second?.messages, []);
+  rmSync(dir, { recursive: true, force: true });
 });
 
 test('Claude jsonl：取 user/assistant 文本，跳过 thinking 与 tool_result', () => {

@@ -2,9 +2,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { detectClaude } from '../src/providers/claude/detect.ts';
 import { detectCodex } from '../src/providers/codex/detect.ts';
+import { detectPi } from '../src/providers/pi/detect.ts';
 import { detectBest, registerProvider, resetRegistry } from '../src/providers/registry.ts';
 import { claudeProvider } from '../src/providers/claude/index.ts';
 import { codexProvider } from '../src/providers/codex/index.ts';
+import { piProvider } from '../src/providers/pi/index.ts';
 import type { DetectContext } from '../src/providers/types.ts';
 
 function ctx(partial: Partial<DetectContext>): DetectContext {
@@ -148,10 +150,41 @@ test('claude 用 Bash 工具跑 codex 子进程时，pane 归更浅的 claude', 
   resetRegistry();
 });
 
+test('前台是 pi 时认领为 pi', () => {
+  const hit = detectPi(
+    ctx({
+      fgCommand: 'pi',
+      processTree: [shell, { pid: 300, ppid: 100, comm: 'pi', args: 'pi', stat: 'Ssl+', tty: 'pts/5' }],
+    }),
+  );
+  assert.equal(hit?.providerId, 'pi');
+  assert.ok((hit?.confidence ?? 0) >= 0.8);
+});
+
+test('node 包装器跑 pi-coding-agent 也能认出来', () => {
+  const hit = detectPi(
+    ctx({
+      fgCommand: 'node',
+      processTree: [
+        {
+          pid: 100,
+          ppid: 1,
+          comm: 'node',
+          args: 'node /home/u/.npm/@earendil-works/pi-coding-agent/dist/cli.js',
+          stat: 'Sl+',
+          tty: 'pts/5',
+        },
+      ],
+    }),
+  );
+  assert.equal(hit?.providerId, 'pi');
+});
+
 test('两个 provider 竞争时各归其主', () => {
   resetRegistry();
   registerProvider(claudeProvider);
   registerProvider(codexProvider);
+  registerProvider(piProvider);
 
   const claudePane = detectBest(
     ctx({
@@ -168,6 +201,14 @@ test('两个 provider 竞争时各归其主', () => {
     }),
   );
   assert.equal(codexPane?.result.providerId, 'codex');
+
+  const piPane = detectBest(
+    ctx({
+      fgCommand: 'pi',
+      processTree: [shell, { pid: 300, ppid: 100, comm: 'pi', args: 'pi', stat: 'Ssl+', tty: 'pts/5' }],
+    }),
+  );
+  assert.equal(piPane?.result.providerId, 'pi');
   resetRegistry();
 });
 
@@ -175,6 +216,7 @@ test('无痕迹的 pane 不产生实例', () => {
   resetRegistry();
   registerProvider(claudeProvider);
   registerProvider(codexProvider);
+  registerProvider(piProvider);
   assert.equal(
     detectBest(
       ctx({

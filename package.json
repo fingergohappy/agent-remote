@@ -2,7 +2,7 @@
   "name": "@fingergohappy2026/agent-remote",
   "version": "0.1.1",
   "type": "module",
-  "description": "手机遥控本机 tmux 里的 coding agent（Claude Code / Codex），以 pane_id 为绑定单位",
+  "description": "手机遥控本机 tmux 里的 coding agent（Claude Code / Codex / Pi），以 pane_id 为绑定单位",
   "engines": {
     "node": ">=22.18.0"
   },
@@ -17,6 +17,7 @@
     "dist",
     "src",
     "hooks",
+    "plugins/pi",
     ".env.example",
     "systemd"
   ],
@@ -29,7 +30,7 @@
     "check": "npm run typecheck && npm test",
     "prepublishOnly": "npm run check",
     "prepack": "npm run build",
-    "sync:plugins": "cp -f hooks/agent-remote-hook.sh hooks/claude-hook.sh plugins/claude/scripts/ && cp -f hooks/agent-remote-hook.sh hooks/codex-hook.sh plugins/codex/scripts/"
+    "sync:plugins": "cp -f hooks/agent-remote-hook.sh hooks/claude-hook.sh plugins/claude/scripts/ && cp -f hooks/agent-remote-hook.sh hooks/codex-hook.sh plugins/codex/scripts/ && mkdir -p plugins/pi/extensions && cp -f hooks/pi-extension.ts plugins/pi/extensions/agent-remote.ts"
   },
   "dependencies": {
     "grammy": "^1.30.0"

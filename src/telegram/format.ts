@@ -32,6 +32,104 @@ export function escapeClipped(raw: string, maxEscaped: number): string {
   return esc + '…';
 }
 
+/** 切已转义文本时避开 `&…;` 实体中间（实体最长 6 字符），超长则截断加省略号 */
+function clipEntitySafe(esc: string, max: number): string {
+  if (esc.length <= max) return esc;
+  let cut = max - 1;
+  const amp = esc.lastIndexOf('&', cut - 1);
+  if (amp > cut - 7 && amp >= 0 && esc.indexOf(';', amp) >= cut) cut = amp;
+  return esc.slice(0, cut) + '…';
+}
+
+/** 行内 markdown：先摘出 code span 护住内容，转义其余，再套 b/i/s/a */
+function inlineMd(raw: string): string {
+  const spans: string[] = [];
+  // 剥掉正文自带的 NUL —— 它是下面 code span 的占位符，Telegram 也不接受 NUL
+  let s = raw.replace(/\u0000/g, '').replace(/`([^`\n]+)`/g, (_m, code: string) => {
+    spans.push(`<code>${escapeHtml(code)}</code>`);
+    return `\u0000${spans.length - 1}\u0000`;
+  });
+  s = escapeHtml(s);
+  s = s.replace(
+    /\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/g,
+    (_m, label: string, url: string) => `<a href="${url.replace(/"/g, '&quot;')}">${label}</a>`,
+  );
+  s = s.replace(/\*\*([^*\n]+)\*\*/g, '<b>$1</b>');
+  s = s.replace(/__([^_\n]+)__/g, '<b>$1</b>');
+  // 前后紧贴字母数字的不当强调（snake_case、a*b）不动
+  s = s.replace(/(?<![\w*])\*([^*\n]+)\*(?![\w*])/g, '<i>$1</i>');
+  s = s.replace(/(?<![\w_])_([^_\n]+)_(?![\w_])/g, '<i>$1</i>');
+  s = s.replace(/~~([^~\n]+)~~/g, '<s>$1</s>');
+  return s.replace(/\u0000(\d+)\u0000/g, (_m, i: string) => spans[Number(i)]!);
+}
+
+/**
+ * agent 回复的 markdown → Telegram HTML 子集（b/i/s/code/pre/a）。
+ * Telegram 不认标题/列表/表格：标题降级为粗体、无序列表换 •，其余原样转义。
+ * 输出保证 ≤ maxLen 且标签闭合，截断只发生在行边界或 pre 内的实体边界；
+ * 连第一行都塞不下时放弃渲染，回落为纯转义截断（escapeClipped）保住内容。
+ * 真到 Telegram 那边 parse 失败还有 egress-queue 的 stripHtml 降级兜底。
+ */
+export function mdToTelegramHtml(raw: string, maxLen: number): string {
+  const budget = maxLen - 2; // 给截断省略号留位
+  const out: string[] = [];
+  let len = 0;
+  let truncated = false;
+
+  const fits = (piece: string): boolean => len + piece.length + (out.length ? 1 : 0) <= budget;
+  const push = (piece: string): void => {
+    len += piece.length + (out.length ? 1 : 0);
+    out.push(piece);
+  };
+
+  const lines = raw.split('\n');
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i]!;
+    const fence = /^\s*(```|~~~)/.exec(line);
+    if (fence) {
+      // 收集到闭合围栏（或文末，未闭合照样出 pre）
+      const marker = fence[1]!;
+      const buf: string[] = [];
+      i++;
+      while (i < lines.length && !lines[i]!.trimStart().startsWith(marker)) {
+        buf.push(lines[i]!);
+        i++;
+      }
+      i++; // 跳过闭合行（越界无妨）
+      let code = escapeHtml(buf.join('\n'));
+      const room = budget - len - '<pre></pre>'.length - (out.length ? 1 : 0);
+      if (room <= 1) {
+        truncated = true;
+        break;
+      }
+      if (code.length > room) {
+        code = clipEntitySafe(code, room);
+        truncated = true;
+      }
+      if (code) push(`<pre>${code}</pre>`);
+      continue;
+    }
+
+    let rendered: string;
+    const heading = /^#{1,6}\s+(.*)$/.exec(line);
+    const bullet = /^(\s*)[-*+]\s+(.*)$/.exec(line);
+    if (heading) rendered = `<b>${inlineMd(heading[1]!)}</b>`;
+    else if (bullet) rendered = `${bullet[1]!}• ${inlineMd(bullet[2]!)}`;
+    else rendered = inlineMd(line);
+
+    if (!fits(rendered)) {
+      truncated = true;
+      break;
+    }
+    push(rendered);
+    i++;
+  }
+
+  if (!out.length) return escapeClipped(raw, maxLen);
+  return out.join('\n') + (truncated ? '…' : '');
+}
+
 const ICONS: Record<AgentEventType, string> = {
   started: '🚀',
   output: '💬',
@@ -67,6 +165,7 @@ export function formatEvent(event: NormalizedEvent, opts: { withTarget?: string 
 const PROVIDER_DOT: Record<string, string> = {
   claude: '🟠',
   codex: '🟢',
+  pi: '🔵',
 };
 
 /** `/home/finger/code/x` → `~/code/x`，列表里路径太长会把行撑爆 */
@@ -120,7 +219,7 @@ export function formatAgentList(
   for (const [session, group] of groupBySession(instances)) {
     lines.push('', `<b>${escapeHtml(session)}</b>`);
     for (const inst of group) {
-      // 圆点颜色跟话题图标一致（claude 橙 / codex 绿），扫一眼就能对上
+      // 圆点颜色跟话题图标一致（claude 橙 / codex 绿 / pi 蓝），扫一眼就能对上
       const dot = PROVIDER_DOT[inst.providerId] ?? '⚪';
       const link = bound.has(inst.paneId) ? ' 🔗' : '';
       // 分支用等宽体，和斜体的路径分开；不用 ⎇ 之类的字符，手机上容易变豆腐块
@@ -157,13 +256,16 @@ export function formatBindingStatus(b: Binding, alive: boolean, display: string 
  * 逐条发会刷屏（30 条历史 = 30 条通知），所以合并成几大块。
  */
 function renderHistoryItem(item: HistoryItem, maxPerItem: number): string {
-  const text = escapeClipped(item.text.trim(), maxPerItem);
-  if (!text) return '';
-  if (item.role === 'user') return `<blockquote>🧑 ${text}</blockquote>`;
+  const raw = item.text.trim();
+  if (!raw) return '';
+  if (item.role === 'user') return `<blockquote>🧑 ${escapeClipped(raw, maxPerItem)}</blockquote>`;
   if (item.role === 'assistant') {
-    return item.kind === 'tool' ? `<i>🔧 ${text}</i>` : `🤖 ${text}`;
+    // agent 的正文按 markdown 渲染；工具行只是摘要，保持纯文本
+    return item.kind === 'tool'
+      ? `<i>🔧 ${escapeClipped(raw, maxPerItem)}</i>`
+      : `🤖 ${mdToTelegramHtml(raw, maxPerItem)}`;
   }
-  return `<i>⚙️ ${text}</i>`;
+  return `<i>⚙️ ${escapeClipped(raw, maxPerItem)}</i>`;
 }
 
 export function formatHistory(items: HistoryItem[], opts: { maxPerItem?: number } = {}): string[] {
@@ -209,7 +311,8 @@ export function formatMirrored(item: HistoryItem): string | null {
     // 纯工具行不投影（和 /history 一致，design §4.3）：只有工具名没有参数，
     // 逐条推只会把正文冲散；「agent 在干活」的观感由 typing 指示器承担
     if (item.kind === 'tool') return null;
-    return escapeClipped(text, MIRROR_MAX);
+    // agent 正文按 markdown 渲染成 Telegram HTML 子集
+    return mdToTelegramHtml(text, MIRROR_MAX);
   }
   return `⚙️ ${escapeClipped(text, 1000)}`;
 }

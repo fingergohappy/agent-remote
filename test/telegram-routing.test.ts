@@ -106,10 +106,14 @@ test('话题配色：每个 provider 固定一色，且只用 Telegram 认的取
   const allowed = [0x6fb9f0, 0xffd67e, 0xcb86db, 0x8eee98, 0xff93b2, 0xfb6f5f];
   const claude = providerTopicColor('claude');
   const codex = providerTopicColor('codex');
+  const pi = providerTopicColor('pi');
 
   assert.ok(claude && allowed.includes(claude));
   assert.ok(codex && allowed.includes(codex));
+  assert.ok(pi && allowed.includes(pi));
   assert.notEqual(claude, codex, '两个 provider 得能分辨');
+  assert.notEqual(pi, claude);
+  assert.notEqual(pi, codex);
   assert.equal(providerTopicColor('unknown'), undefined, '不认识的交给 Telegram 随机配');
 });
 

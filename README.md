@@ -1,18 +1,18 @@
 # agent-remote
 
 手机上的 **coding agent 对讲机**：独立 Telegram Bot + 常驻服务，遥控本机 tmux 里的
-Claude Code / Codex。绑定单位是 **pane（`%14`）**，不是 window —— 一个窗口里开三个 agent 也不会串线。
+Claude Code / Codex / Pi。绑定单位是 **pane（`%14`）**，不是 window —— 一个窗口里开三个 agent 也不会串线。
 
 设计文档在 `~/doc/projects/agent-remote/`（design / decisions / modules / prior-art）。
 本仓库是它的实现。
 
 ```
-Claude hooks   Codex hooks/notify
-      │              │
-      ▼              ▼
- providers/claude  providers/codex     ← 只有这里认识各家的字段
-      └──────┬───────┘
-             ▼
+Claude hooks   Codex hooks/notify   Pi extension
+      │              │                    │
+      ▼              ▼                    ▼
+ providers/claude  providers/codex   providers/pi   ← 只有这里认识各家的字段
+      └──────┬───────┬───────┘
+             ▼              ▼
    NormalizedEvent + AgentProvider
              │
    ┌─────────┴──────────────────────────────┐
@@ -31,11 +31,15 @@ Claude hooks   Codex hooks/notify
 | **绑定** | 一个 pane 一个 Telegram Topic；`(chatId, threadId) → paneId` + 指纹防复用 |
 | **推送** | hook 事件 + **对话全文**（读 agent 原生 transcript）→ 对应 Topic |
 | **回写** | Topic 里打字 → `tmux send-keys -t %N`，不经任何 LLM |
-| **补历史** | `/history` 把绑定前的原生会话记录投影进 Topic（Claude jsonl / Codex rollout） |
-| **授权** | Claude 的 `PreToolUse` / Codex 的 `PermissionRequest` 可在手机上点允许/拒绝，走结构化 hook 响应而非模拟按键 |
+| **补历史** | `/history` 把绑定前的原生会话记录投影进 Topic（Claude jsonl / Codex rollout / Pi session） |
+| **授权** | Claude 的 `PreToolUse` / Codex 的 `PermissionRequest` / Pi 的 `tool_call` 可在手机上点允许/拒绝，走结构化响应而非模拟按键 |
 
 Codex ≥ 0.124 有和 Claude 同形的 hooks 引擎，事件与权限回调都全；
 更老的版本只有单向的 `notify`（仅「完成」通知），provider 两种格式都认，老配置不迁移也能用。
+
+Pi 没有 shell hook，走的是 `hooks/pi-extension.ts`。`setup` 把它拷到
+`~/.pi/agent/extensions/agent-remote.ts`（换机器重跑 setup 即可，不绑仓库路径）。
+`--approval` 会写 `PI_APPROVAL=1`，扩展才会拦截 bash / write / edit。已开着的 pi 要重启才能装上扩展。
 
 ## 快速开始
 
@@ -57,10 +61,11 @@ alias agent-remote='node src/main.ts'   # 下文命令两种方式通用
 agent-remote setup
 ```
 
-它做三件事：初始化 `~/.config/agent-remote/.env`（自动生成 `INGRESS_SECRET`）；把 hook
-合并写入 `~/.claude/settings.json` 与 `~/.codex/hooks.json` —— 幂等、不碰你已有的
-其它 hook、改前自动备份。`--approval` 追加「手机上批 Claude 工具调用」，
-`--uninstall` 干净摘除。手工装 hook 与逐字段说明见 [hooks/INSTALL.md](hooks/INSTALL.md)，
+它做这些事：初始化 `~/.config/agent-remote/.env`（自动生成 `INGRESS_SECRET`）；把 hook
+合并写入 `~/.claude/settings.json` 与 `~/.codex/hooks.json`；把 Pi 扩展拷到
+`~/.pi/agent/extensions/agent-remote.ts` —— 幂等、不碰你已有的其它 hook/扩展、改前自动备份。
+`--approval` 追加「手机上批 Claude / Pi 工具调用」，`--uninstall` 干净摘除。
+手工装 hook 与逐字段说明见 [hooks/INSTALL.md](hooks/INSTALL.md)，
 插件方式见 [plugins/README.md](plugins/README.md)。
 
 然后补上 `~/.config/agent-remote/.env` 里的两个必填项：
@@ -152,7 +157,7 @@ src/
   app/             用例编排：bind / notify / chat / history / decision / mirror
   core/            discover · bind-store · ingress · notify-policy · transcript-watcher ·
                    send · egress-queue · decision-broker · agent-index · activity
-  providers/       claude/ codex/ registry types  ← 只有这层认识各家格式
+  providers/       claude/ codex/ pi/ registry types  ← 只有这层认识各家格式
   telegram/        bot · commands · topics · format
   infra/           tmux · process-tree · http · state-fs · logger
 hooks/             装到 agent 那边的薄脚本
@@ -170,7 +175,7 @@ provider 私有字段 —— 加新 agent 应该只写一个 provider 包 + 注�
    `fetchHistory` / `buildDecisionUi` 按真实能力给
 2. `capabilities` 如实填 —— UI 只渲染为 true 的按钮，**不做兑现不了的 UI**
 3. `main.ts` 里 `registerProvider(...)`
-4. `hooks/` 里加一个 wrapper（`--provider <id>`）
+4. `hooks/` 里加一个入口（Claude/Codex 是 shell wrapper；Pi 是 `pi-extension.ts`）
 
 ## 状态
 
