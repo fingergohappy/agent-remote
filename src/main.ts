@@ -3,6 +3,7 @@
  * 组装与启动（modules.md §8）：
  *   config → providers → bindings → ingress HTTP → telegram bot → reconcile → ready
  */
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadConfig, type Config } from './config.ts';
 import { AgentIndex } from './core/agent-index.ts';
@@ -81,8 +82,44 @@ async function runDoctor(): Promise<number> {
   return 0;
 }
 
+/** 包版本：dist/main.js 与 src/main.ts 的上一级都是包根 */
+function packageVersion(): string {
+  try {
+    const raw = readFileSync(join(import.meta.dirname, '..', 'package.json'), 'utf8');
+    return (JSON.parse(raw) as { version?: string }).version ?? '未知';
+  } catch {
+    return '未知';
+  }
+}
+
+function printHelp(): void {
+  process.stdout.write(
+    `agent-remote ${packageVersion()} —— 手机遥控本机 tmux 里的 coding agent\n` +
+      `\n` +
+      `用法:\n` +
+      `  agent-remote                 启动常驻服务（Telegram Bot + ingress）\n` +
+      `  agent-remote setup           装 hook/扩展、初始化 .env（幂等，改前自动备份）\n` +
+      `      --approval               追加「手机上批工具调用」的阻塞式 hook\n` +
+      `      --uninstall              摘除 setup 写入的条目，别人的一律不碰\n` +
+      `  agent-remote doctor          体检：配置齐不齐、能发现哪些 agent\n` +
+      `  agent-remote --version       打印版本\n` +
+      `\n` +
+      `配置在 ~/.config/agent-remote/.env（字段见包内 .env.example）。\n` +
+      `Telegram 里的命令（/agents /bind /history …）在绑定的话题里直接敲。\n`,
+  );
+}
+
 async function main(): Promise<void> {
   const arg = process.argv[2];
+  // 没有 --help 时这里会直接去起服务、撞端口才停，看着像挂了
+  if (arg === '--help' || arg === '-h' || arg === 'help') {
+    printHelp();
+    return;
+  }
+  if (arg === '--version' || arg === '-v') {
+    process.stdout.write(`${packageVersion()}\n`);
+    return;
+  }
   if (arg === 'doctor' || arg === '--check') {
     process.exitCode = await runDoctor();
     return;
