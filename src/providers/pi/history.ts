@@ -10,6 +10,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { HistoryItem, HistoryRef, HistoryResult } from '../types.ts';
 import { readIncremental, readTailLines, type StreamCursor } from '../transcript-io.ts';
+import { clipToolResult, pickToolArg, toolResultText } from '../tool-summary.ts';
 
 export function sessionsRoot(env: NodeJS.ProcessEnv = process.env): string {
   return join(env.HOME || homedir(), '.pi', 'agent', 'sessions');
@@ -92,28 +93,73 @@ export function resolveTranscript(
   return null;
 }
 
-function textFromContent(content: unknown): { text: string; kind: HistoryItem['kind'] } | null {
+/** `⏺ bash(npm test)` 括号里取哪个入参。pi 的工具名是小写的 */
+const TOOL_ARG_FIELD: Record<string, string> = {
+  bash: 'command',
+  read: 'path',
+  write: 'path',
+  edit: 'path',
+  ls: 'path',
+  ffgrep: 'pattern',
+  grep: 'pattern',
+  glob: 'pattern',
+  webfetch: 'url',
+  websearch: 'query',
+  task: 'description',
+};
+
+/**
+ * 一条 pi 记录 → 屏幕上的若干行（和 Claude 侧同构）。
+ * pi 的 thinking 是明文落盘的，能原样投影；工具结果是另一条 role=toolResult 的记录。
+ */
+function itemsFromContent(
+  content: unknown,
+  role: 'user' | 'assistant',
+  cwd?: string,
+): HistoryItem[] {
   if (typeof content === 'string') {
     const t = content.trim();
-    return t ? { text: t, kind: 'message' } : null;
+    return t ? [{ role, text: t, kind: 'message' }] : [];
   }
-  if (!Array.isArray(content)) return null;
+  if (!Array.isArray(content)) return [];
 
-  const texts: string[] = [];
-  const tools: string[] = [];
+  const items: HistoryItem[] = [];
   for (const block of content) {
     if (!block || typeof block !== 'object') continue;
     const b = block as Record<string, unknown>;
+
     if (b.type === 'text' && typeof b.text === 'string' && b.text.trim()) {
-      texts.push(b.text.trim());
+      const last = items[items.length - 1];
+      if (last?.kind === 'message') last.text += `\n${b.text.trim()}`;
+      else items.push({ role, text: b.text.trim(), kind: 'message' });
+    } else if (b.type === 'thinking') {
+      const t = typeof b.thinking === 'string' ? b.thinking.trim() : '';
+      items.push({ role: 'assistant', text: t, kind: 'reasoning' });
     } else if (b.type === 'toolCall' && typeof b.name === 'string') {
-      tools.push(b.name);
+      items.push({
+        role: 'assistant',
+        text: b.name,
+        kind: 'tool',
+        tool: { name: b.name, arg: pickToolArg(b.arguments, TOOL_ARG_FIELD[b.name], cwd) },
+      });
     }
-    // thinking / image：不投影到 Topic
+    // image：没法投影到 Topic
   }
-  if (texts.length) return { text: texts.join('\n'), kind: 'message' };
-  if (tools.length) return { text: `[工具] ${tools.join(', ')}`, kind: 'tool' };
-  return null;
+  return items; // 顺序照 content 数组 —— 那就是 pi 屏幕上的先后
+}
+
+/** role=toolResult 的记录 → 折叠的输出行 */
+function toolResultItem(message: Record<string, unknown>): HistoryItem | null {
+  const clipped = clipToolResult(toolResultText(message.content));
+  const isError = message.isError === true;
+  if (!clipped.text && !isError) return null;
+  return {
+    role: 'tool',
+    text: clipped.text || '(无输出)',
+    kind: 'tool-result',
+    isError: isError || undefined,
+    moreLines: clipped.moreLines,
+  };
 }
 
 /** `<ts>_<sessionId>.jsonl` → sessionId */
@@ -122,7 +168,7 @@ export function sessionIdFromPath(path: string): string | undefined {
   return m?.[1];
 }
 
-export function parsePiLines(lines: string[]): HistoryItem[] {
+export function parsePiLines(lines: string[], cwd?: string): HistoryItem[] {
   const items: HistoryItem[] = [];
   for (const line of lines) {
     if (!line.trim()) continue;
@@ -137,20 +183,29 @@ export function parsePiLines(lines: string[]): HistoryItem[] {
     const message = rec.message as Record<string, unknown> | undefined;
     if (!message) continue;
 
+    const ts = typeof rec.timestamp === 'string' ? rec.timestamp : undefined;
     const role = message.role;
+
+    if (role === 'toolResult') {
+      const item = toolResultItem(message);
+      if (item) items.push(ts ? { ...item, ts } : item);
+      continue;
+    }
     if (role !== 'user' && role !== 'assistant') continue;
 
-    const parsed = textFromContent(message.content);
-    if (!parsed) continue;
+    const produced = itemsFromContent(message.content, role, cwd);
+    if (!produced.length) continue;
 
+    // terminal 只标在这条记录的最后一行上 —— sessionLooksIdle 从后往前找的就是它
     const stop = message.stopReason;
-    items.push({
-      role,
-      text: parsed.text,
-      ts: typeof rec.timestamp === 'string' ? rec.timestamp : undefined,
-      kind: parsed.kind,
-      terminal:
-        role === 'assistant' && stop !== 'toolUse' && stop !== 'pending' ? true : undefined,
+    const terminal = role === 'assistant' && stop !== 'toolUse' && stop !== 'pending';
+    produced.forEach((item, i) => {
+      const last = i === produced.length - 1;
+      items.push({
+        ...item,
+        ...(ts ? { ts } : {}),
+        ...(last && terminal ? { terminal: true } : {}),
+      });
     });
   }
   return items;
@@ -189,13 +244,13 @@ export async function pollPiTranscript(
   if (!read) return null;
 
   const peekLines = await readTailLines(file, read.fresh && ref.since ? 200 : 40);
-  const peek = parsePiLines(peekLines);
+  const peek = parsePiLines(peekLines, ref.cwd);
   const idle = sessionLooksIdle(peek);
 
   if (read.fresh) {
     const since = ref.since;
     const messages = since
-      ? peek.filter((i) => i.ts && i.ts >= since && i.kind !== 'tool')
+      ? peek.filter((i) => i.ts && i.ts >= since && (i.kind === 'message' || !i.kind))
       : [];
     return { nextCursor: read.cursor, messages, source: file, idle };
   }
@@ -203,7 +258,7 @@ export async function pollPiTranscript(
     return { nextCursor: read.cursor, messages: [], source: file, idle };
   }
 
-  return { nextCursor: read.cursor, messages: parsePiLines(read.lines), source: file, idle };
+  return { nextCursor: read.cursor, messages: parsePiLines(read.lines, ref.cwd), source: file, idle };
 }
 
 export async function fetchPiHistory(
@@ -215,6 +270,7 @@ export async function fetchPiHistory(
   if (!file) return { items: [] };
 
   const lines = await readTailLines(file, Math.max(opts.limit * 8, 200));
-  const items = parsePiLines(lines).filter((i) => i.kind !== 'tool');
+  // 补历史只留对话（实时镜像才照搬每一行）：limit 是「条」，工具行会把配额吃光
+  const items = parsePiLines(lines, ref.cwd).filter((i) => i.kind === 'message' || !i.kind);
   return { items: items.slice(-opts.limit), source: file };
 }

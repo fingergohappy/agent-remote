@@ -367,9 +367,45 @@ test('fs.watch：transcript 有写入自动镜像，不等兜底轮询', async (
 test('镜像文案：agent 回复直出，终端输入标出来源，空内容丢弃', () => {
   assert.equal(formatMirrored({ role: 'assistant', text: '改完了' }), '改完了');
   assert.match(formatMirrored({ role: 'user', text: '继续' }) ?? '', /<blockquote>/);
-  // 工具行不投影（和 /history 一致）：只有名字没有参数，逐条推是纯噪声
-  assert.equal(formatMirrored({ role: 'assistant', text: '[工具] Bash', kind: 'tool' }), null);
   assert.equal(formatMirrored({ role: 'assistant', text: '   ' }), null);
+});
+
+test('镜像文案：工具行照搬 CLI 的 ⏺ Name(arg)', () => {
+  const call = formatMirrored({
+    role: 'assistant',
+    text: 'Bash',
+    kind: 'tool',
+    tool: { name: 'Bash', arg: 'npm run check' },
+  });
+  assert.equal(call, '⏺ <b>Bash</b>(<code>npm run check</code>)');
+
+  // 没有参数的工具只出名字，不留空括号
+  assert.equal(
+    formatMirrored({ role: 'assistant', text: 'TodoWrite', kind: 'tool', tool: { name: 'TodoWrite' } }),
+    '⏺ <b>TodoWrite</b>',
+  );
+});
+
+test('镜像文案：工具输出进可折叠引用块，失败标出来，截断标剩余行数', () => {
+  const ok = formatMirrored({ role: 'tool', text: '242 passing', kind: 'tool-result' }) ?? '';
+  assert.match(ok, /^<blockquote expandable>⎿ 242 passing<\/blockquote>$/);
+
+  const bad =
+    formatMirrored({ role: 'tool', text: '权限不足', kind: 'tool-result', isError: true }) ?? '';
+  assert.match(bad, /<blockquote expandable>⎿ ⚠️ 权限不足/);
+
+  const clipped =
+    formatMirrored({ role: 'tool', text: '头几行', kind: 'tool-result', moreLines: 23 }) ?? '';
+  assert.match(clipped, /… \+23 行/);
+});
+
+test('镜像文案：思考正文拿不到时只留折叠占位，拿得到就进折叠块', () => {
+  assert.equal(
+    formatMirrored({ role: 'assistant', text: '', kind: 'reasoning' }),
+    '✻ <i>Thinking…</i>',
+  );
+  const full = formatMirrored({ role: 'assistant', text: '先看 transcript', kind: 'reasoning' }) ?? '';
+  assert.match(full, /^<blockquote expandable>✻ <i>Thinking…<\/i>\n先看 transcript<\/blockquote>$/);
 });
 
 test('镜像文案：HTML 被转义，不会打断消息格式', () => {

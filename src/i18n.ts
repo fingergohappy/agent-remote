@@ -185,6 +185,8 @@ const M = {
     zh: '📜 <b>{page}/{pages}</b> 页 · {label}（共 {total} 条）',
     en: '📜 Page <b>{page}/{pages}</b> · {label} ({total} total)',
   },
+  'history-fresh': { zh: '🔄 刷出 {n} 条新记录', en: '🔄 {n} new since last look' },
+  'history-latest': { zh: '🔄 已是最新 · 共 {n} 条', en: '🔄 Up to date · {n} total' },
   'items-range': { zh: '第 {a}–{b} 条', en: 'items {a}–{b}' },
   'item-one': { zh: '第 {n} 条', en: 'item {n}' },
   'item-part': { zh: '第 {n} 条 · {i}/{k} 段', en: 'item {n} · part {i}/{k}' },

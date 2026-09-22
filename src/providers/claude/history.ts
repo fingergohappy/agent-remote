@@ -8,6 +8,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { HistoryItem, HistoryRef, HistoryResult } from '../types.ts';
 import { readIncremental, readTailLines, type StreamCursor } from '../transcript-io.ts';
+import { clipToolResult, pickToolArg, toolResultText } from '../tool-summary.ts';
 
 export function projectsRoot(env: NodeJS.ProcessEnv = process.env): string {
   return join(env.HOME || homedir(), '.claude', 'projects');
@@ -78,28 +79,92 @@ export function resolveTranscript(
   return null;
 }
 
-function textFromContent(content: unknown): { text: string; kind: HistoryItem['kind'] } | null {
+/**
+ * `⏺ Bash(npm run check)` 括号里显示哪个入参 —— 照 Claude Code 屏幕上的选择抄。
+ * 没登记的工具（含 MCP 的 `mcp__x__y`）退到「第一个非空字符串入参」。
+ */
+const TOOL_ARG_FIELD: Record<string, string> = {
+  Bash: 'command',
+  BashOutput: 'bash_id',
+  Read: 'file_path',
+  Write: 'file_path',
+  Edit: 'file_path',
+  NotebookEdit: 'notebook_path',
+  Glob: 'pattern',
+  Grep: 'pattern',
+  Task: 'description',
+  Agent: 'description',
+  WebFetch: 'url',
+  WebSearch: 'query',
+  Skill: 'skill',
+  SlashCommand: 'command',
+  KillShell: 'shell_id',
+};
+
+/** 工具行括号里那串，照 Claude Code 屏幕上的选择取字段 */
+export function toolArg(name: string, input: unknown, cwd?: string): string | undefined {
+  return pickToolArg(input, TOOL_ARG_FIELD[name], cwd);
+}
+
+/**
+ * 一条 transcript 记录 → 屏幕上的若干行。
+ * CLI 把 thinking / tool_use / tool_result 各占一行地摊开，这里同样一块一个 item，
+ * 渲染层再决定怎么折叠。thinking 落盘时正文常被剥成空字符串（只剩 signature），
+ * 那就只留一个「思考过了」的占位，跟 CLI 折叠态对齐。
+ */
+function itemsFromContent(
+  content: unknown,
+  role: 'user' | 'assistant',
+  cwd?: string,
+): HistoryItem[] {
   if (typeof content === 'string') {
     const t = content.trim();
-    return t ? { text: t, kind: 'message' } : null;
+    return t ? [{ role, text: t, kind: 'message' }] : [];
   }
-  if (!Array.isArray(content)) return null;
+  if (!Array.isArray(content)) return [];
 
-  const texts: string[] = [];
-  const tools: string[] = [];
+  const items: HistoryItem[] = [];
+  let sawThinking = false;
+
   for (const block of content) {
     if (!block || typeof block !== 'object') continue;
     const b = block as Record<string, unknown>;
+
     if (b.type === 'text' && typeof b.text === 'string' && b.text.trim()) {
-      texts.push(b.text.trim());
+      // 连着的 text 块是同一段话被切开，合成一条
+      const last = items[items.length - 1];
+      if (last?.kind === 'message') last.text += `\n${b.text.trim()}`;
+      else items.push({ role, text: b.text.trim(), kind: 'message' });
+    } else if (b.type === 'thinking') {
+      // 同一条记录里的多个 thinking 块合并成一行，别刷屏
+      const t = typeof b.thinking === 'string' ? b.thinking.trim() : '';
+      if (t) items.push({ role: 'assistant', text: t, kind: 'reasoning' });
+      else if (!sawThinking) items.push({ role: 'assistant', text: '', kind: 'reasoning' });
+      sawThinking = true;
     } else if (b.type === 'tool_use' && typeof b.name === 'string') {
-      tools.push(b.name);
+      items.push({
+        role: 'assistant',
+        text: b.name,
+        kind: 'tool',
+        tool: { name: b.name, arg: toolArg(b.name, b.input, cwd) },
+      });
+    } else if (b.type === 'tool_result') {
+      const clipped = clipToolResult(toolResultText(b.content));
+      const isError = b.is_error === true;
+      if (clipped.text || isError) {
+        items.push({
+          role: 'tool',
+          text: clipped.text || '(无输出)',
+          kind: 'tool-result',
+          isError: isError || undefined,
+          moreLines: clipped.moreLines,
+        });
+      }
     }
-    // thinking / tool_result / image：不投影到 Topic
+    // image：没法投影到 Topic
   }
-  if (texts.length) return { text: texts.join('\n'), kind: 'message' };
-  if (tools.length) return { text: `[工具] ${tools.join(', ')}`, kind: 'tool' };
-  return null;
+
+  return items; // 顺序照 content 数组 —— 那就是 CLI 屏幕上的先后
 }
 
 export function parseClaudeLines(lines: string[]): HistoryItem[] {
@@ -118,15 +183,11 @@ export function parseClaudeLines(lines: string[]): HistoryItem[] {
     const message = rec.message as Record<string, unknown> | undefined;
     if (!message) continue;
 
-    const parsed = textFromContent(message.content);
-    if (!parsed) continue;
-
-    items.push({
-      role: type === 'user' ? 'user' : 'assistant',
-      text: parsed.text,
-      ts: typeof rec.timestamp === 'string' ? rec.timestamp : undefined,
-      kind: parsed.kind,
-    });
+    const ts = typeof rec.timestamp === 'string' ? rec.timestamp : undefined;
+    const cwd = typeof rec.cwd === 'string' ? rec.cwd : undefined;
+    for (const item of itemsFromContent(message.content, type, cwd)) {
+      items.push(ts ? { ...item, ts } : item);
+    }
   }
   return items;
 }
@@ -169,10 +230,10 @@ export async function fetchClaudeHistory(
   const file = resolveTranscript(ref, env);
   if (!file) return { items: [] };
 
-  // 一条消息一行，取尾部若干行足够覆盖 limit 条可见消息（tool/thinking 会被滤掉）。
+  // 一条消息一行，取尾部若干行足够覆盖 limit 条可见消息（工具/思考会被滤掉）。
   const lines = await readTailLines(file, Math.max(opts.limit * 8, 200));
-  // 工具调用不投影到 Topic（design.md §4.3「tool 可折叠/省略」）：
-  // 否则 30 条配额会被 [工具] Bash 这类行吃掉大半，用户翻不到自己问了什么。
-  const items = parseClaudeLines(lines).filter((i) => i.kind !== 'tool');
+  // 补历史只留对话（design.md §4.3「tool 可折叠/省略」）：实时镜像照搬 CLI 的每一行，
+  // 但 /history 的 limit 是「条」，工具行会把 30 条配额吃光，用户翻不到自己问了什么。
+  const items = parseClaudeLines(lines).filter((i) => i.kind === 'message' || !i.kind);
   return { items: items.slice(-opts.limit), source: file };
 }

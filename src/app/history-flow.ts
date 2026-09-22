@@ -99,7 +99,17 @@ export async function syncHistory(
 }
 
 export type HistoryPageView =
-  | { ok: true; text: string; buttons: InlineButton[][]; page: number; pages: number }
+  | {
+      ok: true;
+      text: string;
+      buttons: InlineButton[][];
+      page: number;
+      pages: number;
+      /** 这次读到的总条数 */
+      total: number;
+      /** 比 seen 多出来的条数（没给 seen 就是 0） */
+      fresh: number;
+    }
   | { ok: false; message: string };
 
 /**
@@ -107,11 +117,13 @@ export type HistoryPageView =
  * 按钮里只带「页码 + 每页条数」—— 服务重启后旧消息上的按钮照样能用。
  *
  * @param pageReq 1 起算的页码；0 表示尾页（最新一页）。越界自动收敛。
+ * @param seen 刷新键按下时带回来的「上次看到多少条」，用来算这次多出几条。
  */
 export async function buildHistoryPage(
   binding: Binding,
   pageReq: number,
   size: number,
+  seen?: number,
 ): Promise<HistoryPageView> {
   const provider = mirrorCapable(binding);
   if ('message' in provider) return { ok: false, message: provider.message };
@@ -119,7 +131,8 @@ export async function buildHistoryPage(
   const result = await fetchFor(provider, binding, HISTORY_WINDOW);
   if ('message' in result) return { ok: false, message: result.message };
 
-  const items = result.items.filter((i) => i.kind !== 'tool');
+  // 补历史只留对话：工具调用/输出/思考是实时镜像的活儿，翻页视图放它们会把页数撑爆
+  const items = result.items.filter((i) => i.kind === 'message' || !i.kind);
   const layout = layoutHistoryPages(items, { size });
   if (!layout.length) return { ok: false, message: t('history-none') };
 
@@ -127,21 +140,30 @@ export async function buildHistoryPage(
   const page = pageReq <= 0 ? pages : Math.min(Math.max(pageReq, 1), pages);
   const cur = layout[page - 1]!;
 
-  const atWindowCap = items.length >= HISTORY_WINDOW;
+  const total = items.length;
+  const atWindowCap = total >= HISTORY_WINDOW;
   const header = t('history-page-header', {
     page,
     pages,
     label: cur.label,
-    total: `${items.length}${atWindowCap ? '+' : ''}`,
+    total: `${total}${atWindowCap ? '+' : ''}`,
   });
   const source = result.source ? `\n<i>${escapeHtml(result.source)}</i>` : '';
 
   // 翻页按钮不做禁用态（Telegram 没有）：边界上点⏮/◀ 会编辑出相同内容，
   // egress 对 not modified 静默成功，体感就是「没动」
+  //
+  // 中间那键是刷新：本来就每次重读 transcript，只是从前看着像个页码指示器。
+  // 带上 total 当基线，下次按下就能报「多了几条」；停在尾页时翻成 0，
+  // 这样新记录把页数顶上去了也还跟着最新一页。只有它带第四段 —— 翻页键不需要报数。
+  const atLatest = page === pages;
   const nav: InlineButton[] = [
     { text: '⏮', callbackData: CB.historyPage(1, size) },
     { text: '◀', callbackData: CB.historyPage(Math.max(1, page - 1), size) },
-    { text: `${page}/${pages}`, callbackData: CB.historyPage(page, size) },
+    {
+      text: `🔄 ${page}/${pages}`,
+      callbackData: CB.historyPage(atLatest ? 0 : page, size, total),
+    },
     { text: '▶', callbackData: CB.historyPage(Math.min(pages, page + 1), size) },
     { text: '⏭', callbackData: CB.historyPage(0, size) },
   ];
@@ -152,5 +174,7 @@ export async function buildHistoryPage(
     buttons: [nav],
     page,
     pages,
+    total,
+    fresh: seen === undefined ? 0 : Math.max(0, total - seen),
   };
 }

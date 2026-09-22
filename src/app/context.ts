@@ -74,8 +74,12 @@ export const CB = {
   decision: (correlationId: string, decisionId: string): string =>
     `d:${correlationId}:${decisionId}`,
   history: (limit: number): string => `h:${limit}`,
-  /** 历史分页：page 从 1 起；0 表示「尾页」（最新一页，随数据增长永远有效） */
-  historyPage: (page: number, size: number): string => `hp:${page}:${size}`,
+  /**
+   * 历史分页：page 从 1 起；0 表示「尾页」（最新一页，随数据增长永远有效）。
+   * seen 是按钮生成时的总条数，下次点击拿它比一比就知道刷出了几条新的。
+   */
+  historyPage: (page: number, size: number, seen?: number): string =>
+    seen === undefined ? `hp:${page}:${size}` : `hp:${page}:${size}:${seen}`,
   /** 只断开绑定，话题原样留着 */
   unbind: (threadId: number): string => `u:${threadId}`,
   topicDelete: (threadId: number): string => `td:${threadId}`,
@@ -88,7 +92,7 @@ export type ParsedCallback =
   | { kind: 'bind'; paneId: string }
   | { kind: 'decision'; correlationId: string; decisionId: string }
   | { kind: 'history'; limit: number }
-  | { kind: 'history-page'; page: number; size: number }
+  | { kind: 'history-page'; page: number; size: number; seen?: number }
   | { kind: 'unbind'; threadId: number }
   | { kind: 'topic-delete'; threadId: number }
   | { kind: 'notify-level'; level: 'off' | 'important' | 'info' }
@@ -120,12 +124,15 @@ export function parseCallback(data: string): ParsedCallback {
     return Number.isFinite(threadId) && threadId > 0 ? { kind: 'unbind', threadId } : null;
   }
   if (data.startsWith('hp:')) {
-    const [pageS, sizeS] = data.slice(3).split(':');
+    // seen 是后加的第四段，旧消息上的按钮只有三段 —— 照样认
+    const [pageS, sizeS, seenS] = data.slice(3).split(':');
     const page = Number(pageS);
     const size = Number(sizeS);
-    return Number.isInteger(page) && page >= 0 && Number.isInteger(size) && size > 0
-      ? { kind: 'history-page', page, size }
-      : null;
+    if (!(Number.isInteger(page) && page >= 0 && Number.isInteger(size) && size > 0)) return null;
+    const seen = Number(seenS);
+    return Number.isInteger(seen) && seen >= 0
+      ? { kind: 'history-page', page, size, seen }
+      : { kind: 'history-page', page, size };
   }
   if (data.startsWith('h:')) {
     const limit = Number(data.slice(2));

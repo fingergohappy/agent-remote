@@ -13,6 +13,7 @@ import {
   sessionLooksIdle,
 } from '../src/providers/pi/history.ts';
 import { buildHistoryPage } from '../src/app/history-flow.ts';
+import { CB, parseCallback } from '../src/app/context.ts';
 import { layoutHistoryPages } from '../src/telegram/format.ts';
 import { computeFingerprint, type Binding } from '../src/core/bind-store.ts';
 import { registerProvider, resetRegistry } from '../src/providers/registry.ts';
@@ -28,7 +29,7 @@ test('Pi cwd 编码与 ~/.pi/agent/sessions 下的真实目录名一致', () => 
   assert.equal(encodePiCwd('/home/finger'), '--home-finger--');
 });
 
-test('Pi jsonl：取 user/assistant 文本，跳过 thinking 与 toolResult', () => {
+test('Pi jsonl：thinking / 正文 / 工具调用 / 工具输出各成一行', () => {
   const items = parsePiLines([
     JSON.stringify({ type: 'session', version: 3, id: 's', cwd: '/home/u/proj' }),
     JSON.stringify({
@@ -62,10 +63,34 @@ test('Pi jsonl：取 user/assistant 文本，跳过 thinking 与 toolResult', ()
     items.map((i) => [i.role, i.text, i.kind]),
     [
       ['user', '帮我看看这个 bug', 'message'],
+      // pi 的 thinking 是明文落盘的，不像 Claude 那样被剥空
+      ['assistant', '内部推理不外泄', 'reasoning'],
       ['assistant', '看起来是空指针。', 'message'],
+      ['assistant', 'bash', 'tool'],
+      ['tool', 'ok', 'tool-result'],
     ],
   );
-  assert.equal(items[1]?.terminal, true);
+  assert.equal(items[3]?.tool?.arg, 'ls');
+  assert.equal(items[3]?.terminal, true); // terminal 落在这条记录拆出的最后一行
+});
+
+test('Pi jsonl：stopReason=toolUse 时不标 terminal，空闲判定照旧', () => {
+  const items = parsePiLines([
+    JSON.stringify({
+      type: 'message',
+      message: {
+        role: 'assistant',
+        stopReason: 'toolUse',
+        content: [{ type: 'toolCall', name: 'bash', arguments: { command: 'ls' } }],
+      },
+    }),
+    JSON.stringify({
+      type: 'message',
+      message: { role: 'toolResult', toolName: 'bash', content: [{ type: 'text', text: 'ok' }] },
+    }),
+  ]);
+  assert.ok(items.every((i) => !i.terminal));
+  assert.equal(sessionLooksIdle(items), false); // 工具刚跑完，这一轮还没收尾
 });
 
 test('Pi sessionId 从文件名拆出来', () => {
@@ -137,7 +162,7 @@ test('Pi 首次挂上 transcript 时，since 之后的回复会补推', async ()
   rmSync(dir, { recursive: true, force: true });
 });
 
-test('Claude jsonl：取 user/assistant 文本，跳过 thinking 与 tool_result', () => {
+test('Claude jsonl：thinking / 正文 / tool_result 各成一行，顺序照 CLI 屏幕', () => {
   const lines = [
     JSON.stringify({ type: 'mode', mode: 'normal' }),
     JSON.stringify({
@@ -166,26 +191,83 @@ test('Claude jsonl：取 user/assistant 文本，跳过 thinking 与 tool_result
   ];
 
   const items = parseClaudeLines(lines);
-  assert.equal(items.length, 2);
   assert.deepEqual(
-    items.map((i) => [i.role, i.text]),
+    items.map((i) => [i.role, i.kind, i.text]),
     [
-      ['user', '帮我看看这个 bug'],
-      ['assistant', '看起来是空指针。'],
+      ['user', 'message', '帮我看看这个 bug'],
+      ['assistant', 'reasoning', '内部推理不外泄'],
+      ['assistant', 'message', '看起来是空指针。'],
+      ['tool', 'tool-result', 'ok'],
+    ],
+  );
+  assert.equal(items[1]?.ts, '2026-07-22T17:24:35.652Z'); // 拆出来的行继承整条记录的时间
+});
+
+test('Claude jsonl：thinking 正文常被剥空，只留一个折叠占位（一条记录只留一个）', () => {
+  const items = parseClaudeLines([
+    JSON.stringify({
+      type: 'assistant',
+      message: {
+        content: [
+          { type: 'thinking', thinking: '', signature: 'abc' },
+          { type: 'thinking', thinking: '', signature: 'def' },
+          { type: 'text', text: '好了' },
+        ],
+      },
+    }),
+  ]);
+  assert.deepEqual(
+    items.map((i) => [i.kind, i.text]),
+    [
+      ['reasoning', ''],
+      ['message', '好了'],
     ],
   );
 });
 
-test('Claude jsonl：只有 tool_use 的 assistant 消息标成工具行', () => {
+test('Claude jsonl：工具调用带出主参数，路径相对 cwd —— 就是 CLI 括号里那串', () => {
   const items = parseClaudeLines([
     JSON.stringify({
       type: 'assistant',
-      message: { content: [{ type: 'tool_use', name: 'Bash', input: {} }] },
+      cwd: '/home/u/proj',
+      message: {
+        content: [
+          { type: 'tool_use', name: 'Bash', input: { command: 'npm run check', description: '跑检查' } },
+          { type: 'tool_use', name: 'Edit', input: { file_path: '/home/u/proj/src/main.ts' } },
+          { type: 'tool_use', name: 'mcp__zen__write_note', input: { title: '随手记' } },
+        ],
+      },
     }),
   ]);
-  assert.equal(items.length, 1);
-  assert.equal(items[0]?.kind, 'tool');
-  assert.match(items[0]?.text ?? '', /Bash/);
+  assert.deepEqual(
+    items.map((i) => [i.tool?.name, i.tool?.arg]),
+    [
+      ['Bash', 'npm run check'], // 登记过的工具取 command，不是 description
+      ['Edit', 'src/main.ts'], // cwd 前缀剥掉
+      ['mcp__zen__write_note', '随手记'], // 没登记的退到第一个字符串入参
+    ],
+  );
+  assert.ok(items.every((i) => i.kind === 'tool'));
+});
+
+test('Claude jsonl：工具失败标出来，超长输出截断并记下剩余行数', () => {
+  const long = Array.from({ length: 400 }, (_, i) => `第 ${i} 行输出`).join('\n');
+  const items = parseClaudeLines([
+    JSON.stringify({
+      type: 'user',
+      message: {
+        role: 'user',
+        content: [
+          { type: 'tool_result', tool_use_id: 'a', content: '权限不足', is_error: true },
+          { type: 'tool_result', tool_use_id: 'b', content: long },
+        ],
+      },
+    }),
+  ]);
+  assert.equal(items[0]?.isError, true);
+  assert.equal(items[1]?.isError, undefined);
+  assert.ok(items[1]!.text.length < long.length);
+  assert.ok((items[1]?.moreLines ?? 0) > 0);
 });
 
 test('Codex rollout：只取 event_msg 的 user/agent message，滤掉 developer 提示与噪声', () => {
@@ -268,14 +350,55 @@ test('分页：page 0 进尾页（最新），页码与切片正确', async () =
   assert.match(view.text, /m25/, '尾页要有最新一条');
   assert.doesNotMatch(view.text, /m5\b/, '尾页不该出现前页内容');
 
-  // 导航一行五键：⏮ ◀ 页码 ▶ ⏭；⏭ 用 0 哨兵，数据增长后仍指向真尾页
+  // 导航一行五键：⏮ ◀ 刷新 ▶ ⏭；⏭ 用 0 哨兵，数据增长后仍指向真尾页
   const nav = view.buttons[0]!;
   assert.equal(nav.length, 5);
   assert.equal(nav[0]!.callbackData, 'hp:1:10');
   assert.equal(nav[1]!.callbackData, 'hp:2:10');
-  assert.equal(nav[2]!.text, '3/3');
   assert.equal(nav[3]!.callbackData, 'hp:3:10');
   assert.equal(nav[4]!.callbackData, 'hp:0:10');
+
+  // 中间键是刷新：带上总条数当基线；停在尾页时页码也用 0 哨兵
+  assert.equal(nav[2]!.text, '🔄 3/3');
+  assert.equal(nav[2]!.callbackData, `hp:0:10:${view.total}`);
+  assert.equal(view.fresh, 0, '没给 seen 就没有「新增」一说');
+
+  resetRegistry();
+  cleanup();
+});
+
+test('刷新：重读后比出新增条数；翻页键不带基线所以不报数', async () => {
+  resetRegistry();
+  registerProvider(claudeProvider);
+  const { binding, cleanup } = pagingFixture();
+
+  const first = await buildHistoryPage(binding, 0, 10);
+  assert.ok(first.ok);
+
+  // 假装上次只看到少 3 条 —— 刷新键把当时的总数带了回来
+  const refreshed = await buildHistoryPage(binding, 0, 10, first.total - 3);
+  assert.ok(refreshed.ok);
+  assert.equal(refreshed.fresh, 3);
+  assert.equal(refreshed.total, first.total);
+
+  // 基线比现在还大（历史被截断/换了会话）也不能报负数
+  const shrunk = await buildHistoryPage(binding, 0, 10, first.total + 99);
+  assert.ok(shrunk.ok);
+  assert.equal(shrunk.fresh, 0);
+
+  resetRegistry();
+  cleanup();
+});
+
+test('刷新：不在尾页时刷新原地不动，仍带基线', async () => {
+  resetRegistry();
+  registerProvider(claudeProvider);
+  const { binding, cleanup } = pagingFixture();
+
+  const view = await buildHistoryPage(binding, 2, 10);
+  assert.ok(view.ok);
+  assert.equal(view.page, 2);
+  assert.equal(view.buttons[0]![2]!.callbackData, `hp:2:10:${view.total}`);
 
   resetRegistry();
   cleanup();
@@ -332,4 +455,21 @@ test('布局：超长消息独占页并切成续段，拼回完整原文', () =>
   // 前后的短消息各归自己的页，不跟段页混
   assert.equal(pages[0]!.label, '第 1 条');
   assert.equal(pages[pages.length - 1]!.label, '第 3 条');
+});
+
+test('hp: 回调编解码 —— 第四段是后加的，旧按钮的三段照样认', () => {
+  assert.deepEqual(parseCallback(CB.historyPage(3, 10)), { kind: 'history-page', page: 3, size: 10 });
+  assert.deepEqual(parseCallback(CB.historyPage(0, 10, 42)), {
+    kind: 'history-page',
+    page: 0,
+    size: 10,
+    seen: 42,
+  });
+  // 服务重启前发出去的旧按钮（三段）不能因为少一段就失效
+  assert.deepEqual(parseCallback('hp:2:10'), { kind: 'history-page', page: 2, size: 10 });
+  assert.equal(parseCallback('hp:x:10'), null);
+  // 第四段是垃圾就当没带基线，不能整条作废
+  assert.deepEqual(parseCallback('hp:2:10:abc'), { kind: 'history-page', page: 2, size: 10 });
+  // 64 字节是 Telegram 的硬上限
+  assert.ok(CB.historyPage(999, 50, 99999).length <= 64);
 });

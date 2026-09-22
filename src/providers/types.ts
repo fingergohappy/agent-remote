@@ -124,7 +124,16 @@ export type HistoryItem = {
   role: 'user' | 'assistant' | 'system' | 'tool';
   text: string;
   ts?: string;
-  kind?: 'message' | 'tool' | 'reasoning';
+  kind?: 'message' | 'tool' | 'tool-result' | 'reasoning';
+  /**
+   * 工具调用的两半，对应 CLI 屏幕上的 `⏺ Bash(npm test)`。
+   * 拆开存是为了渲染层能各自上样式（名字加粗、参数等宽）。
+   */
+  tool?: { name: string; arg?: string };
+  /** 工具结果是失败的（CLI 里标红） */
+  isError?: boolean;
+  /** 正文被截断时，后面还剩多少行（CLI 的 `+23 lines`） */
+  moreLines?: number;
   /** assistant 这一轮已经收尾（不是 toolUse）。镜像用来熄灭 typing */
   terminal?: boolean;
 };

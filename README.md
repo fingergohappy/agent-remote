@@ -29,7 +29,7 @@ Claude hooks   Codex hooks/notify   Pi extension
 |--|--|
 | **发现** | `tmux list-panes -a` + 进程树 → 认出哪些 pane 在跑 agent（Codex 前台是 `node` 也认得出） |
 | **绑定** | 一个 pane 一个 Telegram Topic；`(chatId, threadId) → paneId` + 指纹防复用 |
-| **推送** | hook 事件 + **对话全文**（读 agent 原生 transcript）→ 对应 Topic |
+| **推送** | hook 事件 + **CLI 屏幕上的每一行**（对话正文、`⏺ 工具(参数)`、折叠的工具输出）→ 对应 Topic |
 | **回写** | Topic 里打字 → `tmux send-keys -t %N`，不经任何 LLM |
 | **补历史** | `/history` 把绑定前的原生会话记录投影进 Topic（Claude jsonl / Codex rollout / Pi session） |
 | **授权** | Claude 的 `PreToolUse` / Codex 的 `PermissionRequest` / Pi 的 `tool_call` 可在手机上点允许/拒绝，走结构化响应而非模拟按键 |
@@ -105,7 +105,7 @@ tmux 里跑起 claude / codex → 给 Bot 发 `/agents` → 点按钮绑定 →
 |--|--|
 | `/agents` | 列出可遥控的 agent，点按钮绑定 |
 | `/status` | 当前 Topic 绑的是谁、pane 还活着吗 |
-| `/history [n]` | 分页浏览会话历史，n 为每页条数（默认 10） |
+| `/history [n]` | 分页浏览会话历史，n 为每页条数（默认 10）。底部 `⏮ ◀ 🔄 ▶ ⏭`，中间那键原地重读，不用再敲一次命令 |
 | `/notify` | 推送级别菜单（全量 / 只推要事 / 静音），点选即生效 |
 | `/lang` | 界面语言：默认跟随 Telegram 客户端（中/英），也可手动锁定 |
 | `/unbind` | 解绑（**不** kill pane），能关的话题顺手关掉、历史保留 |
@@ -131,9 +131,19 @@ info 下**不推**「✅ 完成」这类空洞事件 —— 回复原文镜像�
 
 **agent 的回复是怎么拿到的**：Claude 的 `Stop` hook 只带 session_id / transcript_path，
 **不含回复正文**。所以 info 下另有一路 `core/transcript-watcher`，按 byte offset 增量读
-agent 自己的会话文件（Claude 的 jsonl / Codex 的 rollout），把新增的往来追加到话题。
+agent 自己的会话文件（Claude 的 jsonl / Codex 的 rollout / Pi 的 session），把新增的往来追加到话题。
 镜像游标持久化在 `~/.config/agent-remote/mirror-cursors.json`：重启后从上次位置续读，
 间隙写入的对话不丢；只有首次见到某个 transcript 文件才从末尾起跟（不回放陈年历史）。
+
+**镜像照搬 CLI 屏幕**（Claude / Pi）：正文之外，工具调用出 `⏺ Bash(npm run check)`
+这样的摘要行，工具输出进 Telegram 的可折叠引用块 —— 默认收起、点一下展开，
+相当于 CLI 的 `ctrl+o`。同一轮的行合并成一条消息，十几次工具调用不会变成十几个通知。
+两处与屏幕对不上，都是数据源所限：
+
+- **Claude 的思考正文拿不到**。落盘时 `thinking` 块正文被剥成空串（只剩 signature），
+  所以只投影一行折叠态的 `✻ Thinking…`。Pi 的 thinking 是明文落盘的，能完整投影。
+- **Codex 暂时只投影对话正文**，没有工具行 —— 它的 rollout 字段还没照真实样本核过。
+- `/history` 仍只投影对话：那里的 limit 是「条」，工具行会把翻页配额吃光。
 
 绑定即推送：不做「人在终端前」的揣测 —— 绑了就发，级别由 `/notify` 控制。
 

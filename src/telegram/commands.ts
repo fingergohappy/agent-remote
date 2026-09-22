@@ -565,7 +565,7 @@ export function registerHandlers(bot: Bot, app: AppContext): void {
             await ctx.answerCallbackQuery({ text: t('not-bound') });
             return;
           }
-          const view = await buildHistoryPage(binding, parsed.page, parsed.size);
+          const view = await buildHistoryPage(binding, parsed.page, parsed.size, parsed.seen);
           if (!view.ok) {
             await ctx.answerCallbackQuery({ text: view.message.slice(0, 190) });
             return;
@@ -580,7 +580,17 @@ export function registerHandlers(bot: Bot, app: AppContext): void {
             // 点的是消息上的按钮就原地编辑；拿不到消息 id（理论不该发生）才新发
             editMessageId: messageId,
           });
-          await ctx.answerCallbackQuery();
+          // 只有刷新键带 seen。没刷出新东西时消息内容一模一样（Telegram 视作
+          // not modified，屏幕上毫无动静），所以必须说一声，否则像按坏了。
+          await ctx.answerCallbackQuery(
+            parsed.seen === undefined
+              ? undefined
+              : {
+                  text: view.fresh
+                    ? t('history-fresh', { n: view.fresh })
+                    : t('history-latest', { n: view.total }),
+                },
+          );
           return;
         }
 

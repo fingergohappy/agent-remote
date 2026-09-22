@@ -98,6 +98,38 @@ test('绑定即推送：镜像消息直达话题，无任何活跃度揣测', as
   assert.equal(sent.length, 1);
 });
 
+test('同一轮的行合成一条消息：一次工具调用不该发三个通知', async (t) => {
+  const { app, sent } = harness(t);
+  const b = binding();
+
+  await handleMirrored(app, [
+    { binding: b, item: { role: 'assistant', text: '', kind: 'reasoning' } },
+    { binding: b, item: { role: 'assistant', text: 'Bash', kind: 'tool', tool: { name: 'Bash', arg: 'npm test' } } },
+    { binding: b, item: { role: 'tool', text: '242 passing', kind: 'tool-result' } },
+    { binding: b, item: { role: 'assistant', text: '测试都过了', kind: 'message' } },
+  ]);
+
+  assert.equal(sent.length, 1, '四行应该合成一条');
+  const out = sent[0]!;
+  assert.ok(out.includes('✻') && out.includes('⏺') && out.includes('⎿') && out.includes('测试都过了'));
+  assert.ok(out.indexOf('⏺') < out.indexOf('⎿'), '顺序照 CLI：先调用后输出');
+});
+
+test('合并不跨话题，也不超 Telegram 单条上限', async (t) => {
+  const { app, sent } = harness(t);
+  const a = binding({ threadId: 10 });
+  const c = binding({ threadId: 20, paneId: '%2' });
+
+  await handleMirrored(app, [msg(a, '甲'), msg(c, '乙'), msg(a, '丙')]);
+  assert.equal(sent.length, 3, '话题交错时不能合并');
+
+  sent.length = 0;
+  const big = 'x'.repeat(2000);
+  await handleMirrored(app, [msg(a, big), msg(a, big), msg(a, big)]);
+  assert.ok(sent.length > 1, '攒满就该切条');
+  assert.ok(sent.every((s) => s.length <= 4096));
+});
+
 test('回声抑制：从 TG 发的话不绕回来，且只挡一次', async (t) => {
   const { app, sent } = harness(t);
   const b = binding();

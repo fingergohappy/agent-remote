@@ -256,15 +256,14 @@ export function formatBindingStatus(b: Binding, alive: boolean, display: string 
  * 逐条发会刷屏（30 条历史 = 30 条通知），所以合并成几大块。
  */
 function renderHistoryItem(item: HistoryItem, maxPerItem: number): string {
+  if (item.kind === 'tool') return renderToolCall(item);
+  if (item.kind === 'tool-result') return renderToolResult(item, maxPerItem);
+  if (item.kind === 'reasoning') return renderThinking(item, maxPerItem);
+
   const raw = item.text.trim();
   if (!raw) return '';
   if (item.role === 'user') return `<blockquote>🧑 ${escapeClipped(raw, maxPerItem)}</blockquote>`;
-  if (item.role === 'assistant') {
-    // agent 的正文按 markdown 渲染；工具行只是摘要，保持纯文本
-    return item.kind === 'tool'
-      ? `<i>🔧 ${escapeClipped(raw, maxPerItem)}</i>`
-      : `🤖 ${mdToTelegramHtml(raw, maxPerItem)}`;
-  }
+  if (item.role === 'assistant') return `🤖 ${mdToTelegramHtml(raw, maxPerItem)}`;
   return `<i>⚙️ ${escapeClipped(raw, maxPerItem)}</i>`;
 }
 
@@ -295,11 +294,59 @@ const MIRROR_MAX = 3500;
 /** 历史合并块的目标大小，留足余量给 HTML 标签 */
 const HISTORY_BLOCK_MAX = 3000;
 
+// ── CLI 那几行的搬运 ─────────────────────────────────────────────────────────
+// 目标是「Claude Code 屏幕上什么样，Topic 里就什么样」：工具调用一行摘要，
+// 输出默认收起。Telegram 的 <blockquote expandable> 就是 CLI 的 ctrl+o 折叠 ——
+// 默认只露几行，点一下展开，既不刷屏也不丢信息。
+
+/** 工具调用：`⏺ Bash(npm run check)` */
+function renderToolCall(item: HistoryItem): string {
+  const name = item.tool?.name ?? item.text.trim();
+  if (!name) return '';
+  const head = `⏺ <b>${escapeHtml(name)}</b>`;
+  const arg = item.tool?.arg;
+  return arg ? `${head}(<code>${escapeHtml(arg)}</code>)` : head;
+}
+
+/** 折叠态看不出输出有多大，所以多行输出先报个行数 —— CLI 的 `+23 lines` 同理 */
+const RESULT_HEAD_LINES = 3;
+
+/** 工具输出：`⎿ …`，进可折叠引用块。截断过的在尾巴标还剩多少行 */
+function renderToolResult(item: HistoryItem, max: number): string {
+  const body = item.text.trim();
+  if (!body) return '';
+  // 引用块里不嵌 <pre>：Telegram 对嵌套实体挑剔，解析失败整条会被 stripHtml 降级
+  const budget = Math.max(max - 80, 200); // 留给 ⎿ 前缀和两条尾注
+  const mark = item.isError ? '⎿ ⚠️ ' : '⎿ ';
+
+  const total = body.split('\n').length + (item.moreLines ?? 0);
+  const head = total > RESULT_HEAD_LINES ? `<i>${total} 行</i>\n` : '';
+  const tail = item.moreLines ? `\n<i>… +${item.moreLines} 行</i>` : '';
+  return `<blockquote expandable>${mark}${head}${escapeClipped(body, budget)}${tail}</blockquote>`;
+}
+
+/**
+ * 思考：CLI 里是 `✻ Thinking…` 加一段灰字。
+ * transcript 落盘时 thinking 正文常被剥成空串（只剩 signature），拿不到就只留这一行 ——
+ * 和 CLI 收起时看到的一样，至少「这里想过一轮」不会丢。
+ */
+function renderThinking(item: HistoryItem, max: number): string {
+  const head = '✻ <i>Thinking…</i>';
+  const body = item.text.trim();
+  if (!body) return head;
+  return `<blockquote expandable>${head}\n${escapeClipped(body, Math.max(max - 40, 200))}</blockquote>`;
+}
+
 /**
  * 实时镜像的一条对话。
  * 和 /history 的区别：这里是流式追加，不加 role 之外的额外修饰，尽量像原文。
  */
 export function formatMirrored(item: HistoryItem): string | null {
+  // 工具/思考行先判 kind：它们的 text 可能是空的（思考占位），但照样要上屏
+  if (item.kind === 'tool') return renderToolCall(item) || null;
+  if (item.kind === 'tool-result') return renderToolResult(item, MIRROR_MAX) || null;
+  if (item.kind === 'reasoning') return renderThinking(item, MIRROR_MAX) || null;
+
   const text = item.text.trim();
   if (!text) return null;
 
@@ -308,9 +355,6 @@ export function formatMirrored(item: HistoryItem): string | null {
     return `<blockquote>🧑 ${escapeClipped(text, MIRROR_MAX)}</blockquote>`;
   }
   if (item.role === 'assistant') {
-    // 纯工具行不投影（和 /history 一致，design §4.3）：只有工具名没有参数，
-    // 逐条推只会把正文冲散；「agent 在干活」的观感由 typing 指示器承担
-    if (item.kind === 'tool') return null;
     // agent 正文按 markdown 渲染成 Telegram HTML 子集
     return mdToTelegramHtml(text, MIRROR_MAX);
   }
